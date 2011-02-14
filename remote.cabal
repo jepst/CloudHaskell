@@ -1,0 +1,17 @@
+Name:                remote
+Version:             0.0
+Description:         Fault-tolerant distributed computing framework
+synopsis:            Fault-tolerant distributed computing framework
+License:             BSD3
+License-file:        LICENSE
+Extra-Source-Files:  README
+Author:              Jeff Epstein <jee36@cam.ac.uk>
+Maintainer:          Jeff Epstein <jee36@cam.ac.uk>
+Build-Depends:       base >= 4, time, filepath, containers, network, syb, binary, mtl, bytestring, template-haskell, stm
+Build-Type:          Simple
+Cabal-Version:       >=1.2
+tested-with:         GHC ==6.12.1
+
+Exposed-Modules:     Remote.Process, Remote.Encoding, Remote.Call, Remote.Peer, Remote.Init, Remote.Closure, Remote.Channel
+ghc-options:         -Wall
+Extensions:          TemplateHaskell, FlexibleInstances, UndecidableInstances, CPP, ExistentialQuantification, DeriveDataTypeable

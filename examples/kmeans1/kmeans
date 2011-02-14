@@ -1,0 +1,26 @@
+#!/bin/bash
+
+nmappers=2
+nreducers=2
+
+pids=""
+
+# ghc --make KMeans || exit 1
+
+for i in {1..nmappers}
+do
+  ./KMeans -cfgRole=MAPPER &
+  pid=$!
+  pids="$pids $pid"
+done
+
+for i in {1..nreducers}
+do
+  ./KMeans -cfgRole=REDUCER &
+  pid=$!
+  pids="$pids $pid"
+done
+
+./KMeans -cfgRole=MASTER
+
+kill $pids
