@@ -1,8 +1,55 @@
 {-# LANGUAGE DeriveDataTypeable #-}
-module Remote.Process where
+module Remote.Process {- (
+                       -- * The Process monad
+                       ProcessM,
+                       NodeId,ProcessId,
+                       PeerInfo,Node,
+                       nullPid,getSelfPid,getSelfNode,isPidLocal,
+
+                       -- * Message receiving
+                       MatchM,receive,receiveWait,receiveTimeout,
+                       match,matchIf,matchUnknown,matchUnknownThrow,
+
+                       -- * Message sending
+                       send,
+
+                       -- * Logging functions
+                       logS,say,
+                       LogSphere(..),LogLevel(..),LogTarget(..),LogFilter(..),LogConfig(..),
+                       setLogConfig,getLogConfig,setNodeLogConfig,setRemoteNodeLogConfig,
+
+                       -- * Exception handling
+                       ptry,ptimeout,pbracket,pfinally,
+
+                       -- * Process spawning
+                       spawn,spawnAnd,forkProcess,spawnRemote,spawnRemoteAnd,spawnRemoteLink,
+                       initNode,roleDispatch,setDaemonic,
+                       AmSpawnOptions(..),SignalType(..),MonitorAction(..),
+                       ProcessMonitorMessage(..),linkProcess,monitorProcess,
+
+                       -- * Config file
+                       readConfig,emptyConfig,Config(..),getConfig,
+
+                       -- * Closures
+                       decode,makeClosure,invokeClosure,
+
+                       -- * Various internals, not for general use
+                       PortId,LocalProcessId,
+                       localRegistryHello,localRegistryRegisterNode,localRegistryQueryNodes,localRegistryUnregisterNode,
+                       sendSimple,makeNodeFromHost,localFromPid,getNewMessageLocal,getProcess,Message,msgPayload,Process,prNodeRef,
+                       forkAndListenAndDeliver,runLocalProcess,
+                       waitForThreads,performFinalization,
+                       UnknownMessageException(..),
+                       TransmitException(..),TransmitStatus(..),PayloadDisposition(..),
+
+                       -- * System service processes, not for general use
+                       startSpawnerService,startLoggingService,startProcessMonitorService,startLocalRegistry,startFinalizerService,startNodeMonitorService,
+                       standaloneLocalRegistry
+                       ) -}
+                       where
 
 import Control.Concurrent (forkIO,ThreadId,threadDelay)
-import Control.Concurrent.MVar (MVar,newMVar, newEmptyMVar,isEmptyMVar,takeMVar,putMVar,modifyMVar_,readMVar)
+import Control.Concurrent.MVar (MVar,newMVar, newEmptyMVar,isEmptyMVar,takeMVar,putMVar,modifyMVar_,withMVar,readMVar)
 import Control.Exception (ErrorCall(..),throwTo,bracket,try,Exception,throw,evaluate,finally,SomeException,PatternMatchFail(..))
 import Control.Monad (foldM,when,liftM)
 import Control.Monad.Trans (MonadTrans,lift,MonadIO,liftIO)
@@ -13,17 +60,17 @@ import Data.List (foldl', isPrefixOf,nub)
 import Data.Maybe (listToMaybe,catMaybes,fromJust,isNothing)
 import Data.Typeable (Typeable)
 import Data.Unique (newUnique,hashUnique)
-import System.IO (Handle,hClose,hSetBuffering,hGetChar,hPutChar,BufferMode(..),hFlush)
+import System.IO (Handle,hIsEOF,hClose,hSetBuffering,hGetChar,hPutChar,BufferMode(..),hFlush)
 import System.IO.Error (isEOFError,isDoesNotExistError,isUserError)
-import Network.BSD (HostEntry(..),getHostName,getHostEntries)
+import System.FilePath (FilePath)
+import Network.BSD (HostEntry(..),getHostName)
 import Network (HostName,PortID(..),PortNumber(..),listenOn,accept,sClose,connectTo,Socket)
 import Network.Socket (PortNumber(..),setSocketOption,SocketOption(..),socketPort,aNY_PORT )
-import qualified Data.Map as Map (Map,fromList,elems,member,map,empty,adjust,alter,insert,delete,lookup,toList,size,insertWith')
+import qualified Data.Map as Map (Map,keys,fromList,unionWith,elems,singleton,member,update,map,empty,adjust,alter,insert,delete,lookup,toList,size,insertWith')
 import Remote.Call (getEntryByIdent,Lookup,empty)
 import Remote.Encoding (serialEncode,serialDecode,serialEncodePure,serialDecodePure,Payload,Serializable,PayloadLength,genericPut,genericGet,hPutPayload,hGetPayload,payloadLength,getPayloadType)
 import System.Environment (getArgs)
 import qualified System.Timeout (timeout)
-import System.FilePath (FilePath)
 import Data.Time (getCurrentTime,diffUTCTime,UTCTime(..),utcToLocalZonedTime)
 import Remote.Closure (Closure (..))
 import Control.Concurrent.STM (STM,atomically,retry,orElse)
@@ -33,6 +80,7 @@ import Control.Concurrent.STM.TVar (TVar,newTVarIO,readTVar,writeTVar)
 
 
 import Debug.Trace
+import Data.Typeable (typeOf)
 
 ----------------------------------------------
 -- * Closures
@@ -137,15 +185,17 @@ data Node = Node
            ndListenPort :: PortId,
            ndConfig :: Config,
            ndLookup :: Lookup,
-           ndLogConfig :: LogConfig
+           ndLogConfig :: LogConfig,
+           ndNodeFinalizer :: MVar (),
+           ndNodeFinalized :: MVar ()
            --conncetion table -- each one is MVared
            --  also contains time info about last contact
        }
 
 
-data NodeId = NodeId HostName PortId deriving (Data,Typeable,Eq)
+data NodeId = NodeId HostName PortId deriving (Data,Typeable,Eq,Ord)
 
-data ProcessId = ProcessId NodeId LocalProcessId deriving (Data,Typeable,Eq) -- TODO OR find-by-processname
+data ProcessId = ProcessId NodeId LocalProcessId deriving (Data,Typeable,Eq,Ord)
 
 instance Binary NodeId where
    put (NodeId h p) = put h >> put p
@@ -249,6 +299,10 @@ getConfig :: ProcessM (Config)
 getConfig = do p <- getProcess
                node <- liftIO $ readMVar (prNodeRef p)
                return $ ndConfig node
+
+getConfigI :: MVar Node -> IO Config
+getConfigI mnode = do node <- readMVar mnode
+                      return $ ndConfig node
 
 getLookup :: ProcessM (Lookup)
 getLookup = do p <- getProcess
@@ -370,7 +424,12 @@ receiveWait m =
                              matchMessages m (mkMsgs p msgs)
 
 receiveTimeout :: Int -> [MatchM q ()] -> ProcessM (Maybe q)
+receiveTimeout 0 m = receive m
 receiveTimeout to m = ptimeout to $ receiveWait m
+
+matchDebug :: (Message -> ProcessM q) -> MatchM q ()
+matchDebug f = do mb <- getMatch
+                  returnHalt () (f (mbMessage mb))
 
 matchUnknown :: ProcessM q -> MatchM q ()
 matchUnknown body = returnHalt () body
@@ -433,15 +492,11 @@ data TransmitStatus = QteOK
                     | QteEncodingError String
                     | QteDispositionFailed
                     | QteLoggingError
-                    | QteUnknownCommand deriving (Show,Read)
+                    | QteUnknownCommand deriving (Show,Read,Typeable,Data) --TODO remove Data
 
-
-data ProcessMonitorException = ProcessMonitorException ProcessId SignalType SignalReason deriving (Typeable)
-
-instance Exception ProcessMonitorException
-
-instance Show ProcessMonitorException where
-  show (ProcessMonitorException pid typ why) = "ProcessMonitorException propagated from process " ++ show pid ++ " by signal " ++ show typ ++ ", reason "++show why
+instance Binary TransmitStatus where
+  put = genericPut
+  get = genericGet
 
 
 ----------------------------------------------
@@ -451,12 +506,13 @@ instance Show ProcessMonitorException where
 initNode :: Config -> Lookup -> IO (MVar Node)
 initNode cfg lookup = 
                do defaultHostName <- getHostName
---                  hostEntries <- getHostEntries False
                   let newHostName =
                        if null (cfgHostName cfg)
                           then defaultHostName
                           else cfgHostName cfg -- TODO it would be nice to check that is name actually makes sense, e.g. try to contact ourselves
                   theNewHostName <- evaluate newHostName
+                  finalizer <- newEmptyMVar
+                  finalized <- newEmptyMVar
                   mvar <- newMVar Node {ndHostName=theNewHostName, 
 --                                        ndHostEntries=hostEntries, 
                                         ndProcessTable=Map.empty,
@@ -464,14 +520,14 @@ initNode cfg lookup =
                                         ndConfig=cfg,
                                         ndLookup=lookup,
                                         ndListenPort=0,
+                                        ndNodeFinalizer=finalizer,
+                                        ndNodeFinalized=finalized,
                                         ndLogConfig=defaultLogConfig}
                   return mvar
 
 roleDispatch :: MVar Node -> (String -> ProcessM ()) -> IO ()
-roleDispatch mnode func = readMVar mnode >>= 
-              \node -> 
-                   let role = cfgRole (ndConfig node) in
-                   runLocalProcess mnode (func role) >> return ()
+roleDispatch mnode func = do cfg <- getConfigI mnode
+                             runLocalProcess mnode (func (cfgRole cfg)) >> return ()
 
 spawnAnd :: ProcessM () -> ProcessM () -> ProcessM ProcessId
 spawnAnd fun and = do p <- getProcess
@@ -513,18 +569,15 @@ runLocalProcess node fun =
              return pid
          where
           notifyProcessDown p r = do nid <- getNodeId node
-                                     let pp = adminGetPid nid ServiceGlobal 
-                                     let msg = AmSignal (prPid p) SigProcessDown r True
+                                     let pp = adminGetPid nid ServiceProcessMonitor
+                                     let msg = GlProcessDown (prPid p) r
                                      try $ sendBasic node pp (msg) (Nothing::Maybe ()) PldAdmin :: IO (Either SomeException TransmitStatus)--ignore result ok
-          notifyProcessUp p = do nid <- getNodeId node
-                                 let pp = adminGetPid nid ServiceGlobal 
-                                 let msg = AmSignal (prPid p) SigProcessUp SrNormal True
-                                 try $ sendBasic node pp (msg) (Nothing::Maybe ()) PldAdmin :: IO (Either SomeException TransmitStatus)--ignore result ok
+          notifyProcessUp p = return ()
           exceptionHandler e p = let shown = show e in
                 notifyProcessDown (p) (SrException shown) >>
                  (try (logI node  (prPid p) "SYS" LoCritical (concat ["Process got unhandled exception ",shown]))::IO(Either SomeException ())) >> return () --ignore error
           exceptionCatcher p fun = do notifyProcessUp (p)
-                                      res <- try fun -- TODO handle interprocess signals separately
+                                      res <- try fun
                                       case res of
                                         Left e -> exceptionHandler (e::SomeException) p
                                         Right a -> notifyProcessDown (p) SrNormal >> return a
@@ -569,8 +622,8 @@ runLocalProcess node fun =
 -- * Roundtrip conversations
 ----------------------------------------------
 
-roundtripQueryAsync :: (Serializable a,Serializable b) => PayloadDisposition -> [ProcessId] -> a -> ProcessM [Either TransmitStatus b]
-roundtripQueryAsync pld pids dat = 
+roundtripQueryMulti :: (Serializable a,Serializable b) => PayloadDisposition -> [ProcessId] -> a -> ProcessM [Either TransmitStatus b]
+roundtripQueryMulti pld pids dat = -- TODO timeout
                       let 
                           convidsM = mapM (\_ -> liftIO $ newConversationId) pids
                        in do convids <- convidsM
@@ -608,7 +661,7 @@ roundtripQuery pld pid dat =
             QteOK -> receiveWait [matchCore pld (\(_,h) -> case h of
                                                             Just a -> msgheaderConversationId a == convId && msgheaderSender a == pid
                                                             Nothing -> False) (return . Right . fst)]
-            err -> return (Left err)
+            err -> return (Left err) -- TODO this needs to be interrupted if the other side goes down
 
 roundtripResponse :: (Serializable a, Serializable b) => PayloadDisposition -> (a -> ProcessM (b,q)) -> MatchM q ()
 roundtripResponse pld f =
@@ -618,9 +671,9 @@ roundtripResponse pld f =
                            Just _ -> True
                            Nothing -> False
          transformer (m,Just h) = 
-                         do
+                         do 
                             selfpid <- getSelfPid
-                            (a,q) <- f m -- TODO put this in a try block, maybe send error message to other side 
+                            (a,q) <- f m -- TODO put this in a try block, send error message to other side, where it propagates; this is only useful if we are also monitoring the node in question
                             res <- sendTry (msgheaderSender h) a (Just RoundtripHeader {msgheaderSender=msgheaderDestination h,msgheaderDestination = msgheaderSender h,
                                                                                  msgheaderConversationId=msgheaderConversationId h}) PldUser
                             case res of
@@ -660,26 +713,25 @@ sendTry pid msg msghdr pld = getProcess >>= (\p ->
                               Right r -> return r)
                where action = 
                       do p <- getProcess
-                         node <- liftIO $ readMVar (prNodeRef p)
                          liftIO $ sendBasic (prNodeRef p) pid msg msghdr pld
        in tryAction )      
 
 sendBasic :: (Serializable a,Serializable b) => MVar Node -> ProcessId -> a -> Maybe b -> PayloadDisposition -> IO TransmitStatus
 sendBasic mnode pid msg msghdr pld = do
               nid <- getNodeId mnode
-              node <- readMVar mnode
               encoding <- liftIO $ serialEncode msg
               header <- maybe (return Nothing) (\x -> do t <- liftIO $ serialEncode x
                                                          return $ Just t) msghdr
               let themsg = Message {msgDisposition=pld,msgHeader = header,msgPayload=encoding}
+                       -- TODO allow an alternate, nonserialized format of message (using Dynamic) for local transmissions
               let islocal = nodeFromPid pid == nid
               (if islocal then sendRawLocal else sendRawRemote) mnode pid nid themsg
 
 sendRawLocal :: MVar Node -> ProcessId -> NodeId -> Message -> IO TransmitStatus
 sendRawLocal noderef thepid nodeid msg
      | thepid == nullPid = return QteUnknownPid
-     | otherwise = do node <- readMVar noderef
-                      messageHandler (ndConfig node) noderef (msgDisposition msg) msg (cfgNetworkMagic (ndConfig node)) (localFromPid thepid)
+     | otherwise = do cfg <- getConfigI noderef
+                      messageHandler cfg noderef (msgDisposition msg) msg (cfgNetworkMagic cfg) (localFromPid thepid)
                   
 sendRawRemote :: MVar Node -> ProcessId -> NodeId -> Message -> IO TransmitStatus
 sendRawRemote noderef thepid@(ProcessId (NodeId hostname portid) localpid) nodeid msg
@@ -696,8 +748,8 @@ sendRawRemote noderef thepid@(ProcessId (NodeId hostname portid) localpid) nodei
                (\h -> hSetBuffering h (BlockBuffering Nothing) >> return h))
                  (hClose)
                  (sender)
-          sender h = do node <- readMVar noderef
-                        writeMessage h (cfgNetworkMagic (ndConfig node),localpid,nodeid,msg)
+          sender h = do cfg <- getConfigI noderef
+                        writeMessage h (cfgNetworkMagic cfg,localpid,nodeid,msg)
     
 writeMessage :: Handle -> (String,LocalProcessId,NodeId,Message)-> IO TransmitStatus
 writeMessage h (magic,dest,nodeid,msg) = 
@@ -765,7 +817,8 @@ getProcessTableEntry tbl adestp = let res = Map.lookup adestp (ndProcessTable tb
 
 deliver :: LocalProcessId -> MVar Node -> Message -> IO (Maybe ProcessTableEntry)
 deliver adestp tbl msg = 
-         do node <- readMVar tbl
+         do
+            node <- readMVar tbl
             atomically $ do pte <- getProcessTableEntry node adestp
                             maybe (return Nothing) (\x -> writeTChan (pteChannel x) msg >> return (Just x)) pte
                                
@@ -800,7 +853,6 @@ listenAndDeliver node cfg coord =
          cleanBody n = reverse $ dropWhile isSpace (reverse (dropWhile isSpace n))
          handleComm h hostname portn = 
             do (magic,adestp,nodeid,msg) <- readMessage h
-               nd <- readMVar node
                res <- messageHandler cfg node (msgDisposition msg) msg magic adestp
                writeResult h res
                case res of
@@ -811,7 +863,7 @@ listenAndDeliver node cfg coord =
             do
                (h,hostname,portn) <- accept sock
                hSetBuffering h (BlockBuffering Nothing)
-               forkIO (handleCommSafe h hostname portn `finally` hClose h)
+               _ <- forkIO (handleCommSafe h hostname portn `finally` hClose h)
                handleConnection sock
 
 
@@ -825,7 +877,7 @@ messageHandler cfg node pld = case pld of
                          || cfgRole cfg == localRegistryMagicRole-- message to local magic-neutral registry
          dispositionAdminHandler msg magic adestp 
             | validMagic magic = 
-                 do tbl <- readMVar node
+                 do 
                     realPid <- adminLookupN (toEnum adestp) node
                     case realPid of
                          Left er -> return er
@@ -837,7 +889,7 @@ messageHandler cfg node pld = case pld of
 
          dispositionUserHandler msg magic adestp
             | validMagic magic = 
-                     do tbl <- readMVar node
+                     do 
                         res <- deliver adestp node msg
                         case res of
                            Nothing -> return QteUnknownPid
@@ -942,6 +994,9 @@ getSelfPid = do p <- getProcess
 
 nodeFromPid :: ProcessId -> NodeId
 nodeFromPid (ProcessId nid _) = nid
+
+makeNodeFromHost :: String -> PortId -> NodeId
+makeNodeFromHost = NodeId
 
 localFromPid :: ProcessId -> LocalProcessId
 localFromPid (ProcessId _ lid) = lid
@@ -1140,6 +1195,7 @@ instance Binary LogMessage where
 
 instance Show LogMessage where
   show (LogMessage utc ll ls s pid _) = concat [paddedString 30 (show utc)," ",(show $ fromEnum ll)," ",paddedString 28 (show pid)," ",ls," ",s]
+  show (LogUpdateConfig _) = "LogUpdateConfig"
 
 showLogMessage :: LogMessage -> IO String
 showLogMessage (LogMessage utc ll ls s pid _) = 
@@ -1242,16 +1298,103 @@ startLoggingService = serviceThread ServiceLog logger
                                   when (self /= nid) 
                                     (sendSimple (adminGetPid nid ServiceLog) (forwardify txt) PldAdmin >> return ()) -- ignore error -- what can we do?
               n -> throw $ ConfigException $ "Invalid message forwarded setting"
-                                  
+
 
 ----------------------------------------------
--- * Global registry
+-- * Node monitoring
 ----------------------------------------------
 
-data ServiceId = ServiceGlobal 
-               | ServiceLog 
+data NodeMonitorCommand = 
+           NodeMonitorStart NodeId
+         | NodeMonitorPing
+           deriving (Typeable,Data)
+instance Binary NodeMonitorCommand where put=genericPut;get=genericGet
+
+data NodeMonitorSignal = 
+         NodeMonitorNodeFailure NodeId deriving (Typeable,Data)
+instance Binary NodeMonitorSignal where put=genericPut;get=genericGet
+
+data NodeMonitorInformation = 
+           NodeMonitorNodeDown NodeId
+           deriving (Typeable,Data)
+instance Binary NodeMonitorInformation where put=genericPut;get=genericGet
+
+monitorNode :: NodeId -> ProcessM ()
+monitorNode nid = do 
+                     mynid <- getSelfNode
+                     res <- roundtripQuery PldAdmin (adminGetPid mynid ServiceNodeMonitor) (NodeMonitorStart nid)
+                     case res of
+                       Right () -> return ()
+                       _ -> (throw $ ServiceException $ "while contacting node monitor "++show res)
+
+pingNode :: NodeId -> ProcessM Bool
+pingNode nid = do res <- ptimeout repingtimeout $ roundtripQuery PldAdmin (adminGetPid nid ServiceNodeMonitor) (NodeMonitorPing)   --TODO this should be replaced with a version of roundtripQuery with integrates timeouts
+                  case res of
+                       Just (Right ()) -> return True
+                       _ -> return False
+    where
+          repingtimeout = 5000000
+
+-- this can be re-engineered to avoid setting up and tearing down TCP connections and threads
+-- at every ping. Instead open up a TCP connection to the pingee and require it to send us a hello
+-- every N seconds or die
+startNodeMonitorService :: ProcessM ()
+startNodeMonitorService = serviceThread ServiceNodeMonitor (service Map.empty)
+  where
+    service state = 
+      let matchCommand cmd = case cmd of
+                               NodeMonitorPing -> return ((),state)
+                               NodeMonitorStart nid -> do res <- addmonitor nid
+                                                          return ((),res)
+          matchSignal cmd = case cmd of
+                               NodeMonitorNodeFailure nid -> do res <- handlefailure nid
+                                                                return (res)
+          listenaction nid mainpid =
+             let onfailure = sendSimple mainpid (NodeMonitorNodeFailure nid)  PldUser >> return ()
+                 loop = do res <- pingNode nid
+                           case res of
+                              False -> onfailure
+                              True -> liftIO (threadDelay interpingtimeout) >> loop
+             in
+               do loop 
+          failurelimit = 3 -- TODO make configurable
+          interpingtimeout = 5000000
+          retrytimeout =  1000000
+          reportfailure nid = do mynid <- getSelfNode
+                                 sendSimple (adminGetPid mynid ServiceProcessMonitor) (GlNodeDown nid) PldAdmin
+          handlefailure nid = case Map.lookup nid state of
+                                    Just c -> if c >= failurelimit
+                                                then do reportfailure nid
+                                                        return (Map.delete nid state)
+                                                else do mypid <- getSelfPid
+                                                        spawn (liftIO (threadDelay retrytimeout) >> listenaction nid mypid)
+                                                        return (Map.adjust succ nid state)
+                                    Nothing -> return state
+          addmonitor nid = case Map.member nid state of
+                                  True -> return state
+                                  False -> do mynid <- getSelfNode
+                                              mypid <- getSelfPid
+                                              if mynid==nid
+                                                 then return state
+                                                 else do spawnAnd (listenaction nid mypid) setDaemonic
+                                                         return $ Map.insert nid (0) state
+                                                 
+       in receiveWait [roundtripResponse PldAdmin matchCommand,
+                       match matchSignal,
+                       matchUnknownThrow] >>= service
+        
+
+----------------------------------------------
+-- * Service helpers
+----------------------------------------------
+
+data ServiceId =  
+                 ServiceLog 
                | ServiceSpawner 
-               | ServiceNodeRegistry deriving (Ord,Eq,Enum,Show)
+               | ServiceNodeRegistry 
+               | ServiceNodeMonitor 
+               | ServiceProcessMonitor 
+                 deriving (Ord,Eq,Enum,Show)
 
 adminGetPid :: NodeId -> ServiceId -> ProcessId
 adminGetPid nid sid = ProcessId nid (fromEnum sid)
@@ -1265,10 +1408,10 @@ adminDeregister val = do p <- getProcess
 adminRegister :: ServiceId -> ProcessM ()
 adminRegister val =  do p <- getProcess
                         pid <- getSelfPid
-                        node <- liftIO $ readMVar (prNodeRef p)
-                        if Map.member val (ndAdminProcessTable node) 
+                        liftIO $ modifyMVar_ (prNodeRef p) (\node ->
+                         if Map.member val (ndAdminProcessTable node) 
                            then throw $ ServiceException $ "Duplicate administrative registration at index " ++ show val    
-                           else liftIO $ modifyMVar_ (prNodeRef p) (fun $ localFromPid pid)
+                           else (fun (localFromPid pid) node))
             where fun pid node = return $ node {ndAdminProcessTable = Map.insert val pid (ndAdminProcessTable node)}
 
 adminLookup :: ServiceId -> ProcessM LocalProcessId
@@ -1285,6 +1428,21 @@ adminLookupN val mnode =
                         Nothing -> return $ Left QteUnknownPid
                         Just x -> return $ Right x
 
+startFinalizerService :: ProcessM () -> ProcessM ()
+startFinalizerService todo = spawnAnd body prefix >> return ()
+                 where prefix = setDaemonic
+                       body = 
+                             do p <- getProcess
+                                node <- liftIO $ readMVar (prNodeRef p)
+                                liftIO $ takeMVar (ndNodeFinalizer node)
+                                todo `pfinally` (liftIO $ putMVar (ndNodeFinalized node) ())
+
+
+performFinalization :: MVar Node -> IO ()
+performFinalization mnode = do node <- readMVar mnode
+                               putMVar (ndNodeFinalizer node) ()
+                               takeMVar (ndNodeFinalized node)                              
+
 setDaemonic :: ProcessM ()
 setDaemonic = do p <- getProcess
                  pid <- getSelfPid
@@ -1297,41 +1455,32 @@ serviceThread v f = spawnAnd (pbracket (return ())
                              (\_ -> f)) (adminRegister v >> setDaemonic) >> return ()
           where logError = logS "SYS" LoFatal $ "System process "++show v++" has terminated" -- TODO maybe restart?
 
-data AmSignal = AmSignal ProcessId SignalType SignalReason Bool deriving (Typeable)
-instance Binary AmSignal where 
-   put (AmSignal pid st sr p) = put pid >> put st >> put sr >> put p
-   get = do pid <- get
-            st <- get
-            sr <- get
-            p <- get
-            return $ AmSignal pid st sr p
 
-data AmMonitor = AmMonitor SignalType MonitorAction ProcessId ProcessId Bool deriving(Typeable,Show)
-instance Binary AmMonitor where
-   put (AmMonitor st ma pid1 pid2 p) = put st >> put ma >> put pid1 >> put pid2 >> put p
-   get = do st <- get
-            ma <- get
-            pid1 <- get
-            pid2 <- get
-            p <- get
-            return $ AmMonitor st ma pid1 pid2 p
+----------------------------------------------
+-- * Global and spawn service 
+----------------------------------------------
 
-data SignalType = SigProcessUp 
-                | SigProcessDown
-                | SigUser String deriving (Typeable,Eq,Show)
-instance Binary SignalType where 
-   put SigProcessUp = putWord8 0
-   put SigProcessDown = putWord8 1
-   put (SigUser n) = putWord8 2 >> put n
-   get = getWord8 >>= \x ->
-           case x of
-             0 -> return SigProcessUp 
-             1 -> return SigProcessDown
-             2 -> get >>= \q -> return $ SigUser q
+data GlSignal = GlProcessDown ProcessId SignalReason
+              | GlNodeDown NodeId deriving (Typeable,Data,Show)
+instance Binary GlSignal where
+   put = genericPut
+   get = genericGet
+
+data GlSynchronous = GlRequestMonitoring ProcessId ProcessId MonitorAction
+                   | GlRequestMoniteeing ProcessId NodeId deriving (Typeable, Data)
+instance Binary GlSynchronous where
+   put = genericPut
+   get = genericGet
+
+data GlCommand = GlMonitor ProcessId ProcessId MonitorAction
+               | GlUnmonitor ProcessId ProcessId MonitorAction deriving (Typeable,Data)
+instance Binary GlCommand where
+   put = genericPut
+   get = genericGet
 
 data MonitorAction = MaMonitor 
                    | MaLink 
-                   | MaLinkError deriving (Typeable,Show)
+                   | MaLinkError deriving (Typeable,Show,Ord,Eq,Data) --TODO remove Data
 instance Binary MonitorAction where 
   put MaMonitor = putWord8 0
   put MaLink = putWord8 1
@@ -1342,40 +1491,267 @@ instance Binary MonitorAction where
           1 -> return MaLink
           2 -> return MaLinkError
 
-data SignalReason = SrNormal | SrException String deriving (Typeable,Data,Show)
+data SignalReason = SrNormal 
+                  | SrException String
+                  | SrNoPing
+                  | SrInvalid deriving (Typeable,Data,Show)
 instance Binary SignalReason where 
      put SrNormal = putWord8 0
      put (SrException s) = putWord8 1 >> put s
+     put SrNoPing = putWord8 2
+     put SrInvalid = putWord8 3
      get = do a <- getWord8
               case a of
                  0 -> return SrNormal
                  1 -> get >>= return . SrException
+                 2 -> return SrNoPing
+                 3 -> return SrInvalid
+
+type GlLinks = Map.Map ProcessId 
+                  (Map.Map (LocalProcessId,MonitorAction) (Int),
+                   Map.Map LocalProcessId (Int),
+                   Map.Map NodeId ())
+
+data GlobalData = GlobalData
+     {
+        glLinks :: GlLinks
+     }
+
+gdCombineEntry :: (Map.Map (LocalProcessId,MonitorAction) (Int),
+                   Map.Map LocalProcessId (Int),
+                   Map.Map NodeId ()) -> (Map.Map (LocalProcessId,MonitorAction) (Int),
+                   Map.Map LocalProcessId (Int),
+                   Map.Map NodeId ()) -> (Map.Map (LocalProcessId,MonitorAction) (Int),
+                   Map.Map LocalProcessId (Int),
+                   Map.Map NodeId ())
+gdCombineEntry newval@(newmonitors,newmonitees,newnodes) oldval@(oldmonitors,oldmonitees,oldnodes) = 
+    let finalnodes = Map.unionWith const newnodes oldnodes
+        finalmonitors = Map.unionWith (+) newmonitors oldmonitors
+        finalmonitees = Map.unionWith (+) newmonitees oldmonitees
+     in (finalmonitors,finalmonitees,finalnodes)
+
+gdAddMonitor :: GlLinks -> ProcessId -> MonitorAction -> LocalProcessId -> GlLinks
+gdAddMonitor gl pid ma lpid = 
+   Map.insertWith' gdCombineEntry pid (Map.singleton (lpid,ma) 1, Map.empty,Map.empty) gl
+
+gdDelMonitor :: GlLinks -> ProcessId -> MonitorAction -> LocalProcessId -> GlLinks
+gdDelMonitor gl pid ma lpid = Map.adjust editentry pid gl
+  where editentry (mons,mots,ns) = (fixmons mons,mots,ns)
+        fixmons m = Map.update (\a -> if pred a == 0
+                                         then Nothing
+                                         else Just (pred a)) (lpid,ma) m
+
+gdAddMonitee :: GlLinks -> ProcessId -> LocalProcessId -> GlLinks
+gdAddMonitee gl pid lpid = 
+   Map.insertWith' gdCombineEntry pid (Map.empty,Map.singleton lpid 1,Map.empty) gl
+
+gdDelMonitee :: GlLinks -> ProcessId -> LocalProcessId -> GlLinks
+gdDelMonitee gl pid lpid = Map.adjust editentry pid gl
+  where editentry (mons,mots,ns) = (mons,fixmons mots,ns)
+        fixmons m = Map.update (\a -> if pred a == 0
+                                         then Nothing
+                                         else Just (pred a)) lpid m
+
+glExpungeProcess :: GlLinks -> ProcessId -> NodeId -> GlLinks
+glExpungeProcess gl pid myself = 
+                    let mine n = buildPidFromNodeId myself n
+                     in case Map.lookup pid gl of
+                             Nothing -> gl
+                             Just (mons,mots,ns) -> 
+                                  let s1 = Map.delete pid gl
+                                      s2 = foldl' (\g (lp,_)-> Map.delete (mine lp) g) s1 (Map.keys mons)
+                                      s3 = foldl' (\g lp -> Map.delete (mine lp) g) s2 (Map.keys mots)
+                                   in s3
+
+gdAddNode :: GlLinks -> ProcessId -> NodeId -> GlLinks
+gdAddNode gl pid nid = Map.insertWith' gdCombineEntry pid (Map.empty,Map.empty,Map.singleton nid ()) gl
+
+data ProcessMonitorException = ProcessMonitorException ProcessId SignalReason deriving (Typeable)
+
+instance Binary ProcessMonitorException where
+  put (ProcessMonitorException pid sr) = put pid >> put sr
+  get = do pid <- get
+           sr <- get
+           return $ ProcessMonitorException pid sr
+
+instance Exception ProcessMonitorException
+
+instance Show ProcessMonitorException where
+  show (ProcessMonitorException pid why) = "ProcessMonitorException: " ++ show pid ++ " has terminated because "++show why
+
+linkProcess :: ProcessId -> ProcessM ()
+linkProcess p = do mypid <- getSelfPid 
+                   mynid <- getSelfNode
+                   let servicepid = (adminGetPid mynid ServiceProcessMonitor) 
+                       msg1 = GlMonitor mypid p MaLinkError
+                       msg2 = GlMonitor p mypid MaLinkError
+                   res1 <- roundtripQuery PldAdmin servicepid msg1 
+                   case res1 of 
+                      Right QteOK -> do res2 <- roundtripQuery PldAdmin servicepid msg2
+                                        case res2 of 
+                                           Right QteOK -> return ()
+                                           Right err -> herr err
+                                           Left err -> herr err
+                      Right err -> herr err
+                      Left err -> herr err
+        where herr err = throw $ ServiceException $ "Error when linking process " ++ show p ++ ": " ++ show err
+
+monitorProcess :: ProcessId -> ProcessId -> MonitorAction -> ProcessM ()
+monitorProcess monitor monitee how = 
+     let msg = GlMonitor monitor monitee how
+      in do let servicepid = (adminGetPid (nodeFromPid monitee) ServiceProcessMonitor) 
+            res <- roundtripQuery PldAdmin servicepid msg -- TODO add timeout
+            case res of
+              Right QteOK -> return ()
+              err -> herr err
+         where herr err = throw $ ServiceException $ "Error when monitoring process " ++ show monitee ++ ": " ++ show err
+
+sendInterrupt :: (Exception e) => ProcessId -> e -> ProcessM Bool
+sendInterrupt pid e = do islocal <- isPidLocal pid
+                         case islocal of
+                            False -> return False
+                            True -> do p <- getProcess
+                                       node <- liftIO $ readMVar (prNodeRef p)
+                                       res <- liftIO $ atomically $ getProcessTableEntry node (localFromPid pid)
+                                       case res of 
+                                          Just pte -> do liftIO $ throwTo (pteThread pte) e
+                                                         return True
+                                          Nothing -> return False
+
+startProcessMonitorService :: ProcessM ()
+startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyGlobal)
+  where 
+    emptyGlobal = GlobalData {glLinks=Map.empty}
+    getGlobalFor pid = adminGetPid (nodeFromPid pid) ServiceProcessMonitor
+    checkliveness pid = do islocal <- isPidLocal pid
+                           case islocal of
+                             True -> isProcessUp (localFromPid pid)
+                             False -> return True
+    checklivenessandtrigger monitor monitee action = 
+                                            do a <- checkliveness monitee
+                                               case a of
+                                                  True -> return True
+                                                  False -> do trigger monitor monitee action SrInvalid
+                                                              return False
+    trigger :: ProcessId -> ProcessId -> MonitorAction -> SignalReason -> ProcessM ()
+    trigger towho aboutwho how why = 
+                 let 
+                      msg = ProcessMonitorException aboutwho why
+                  in case how of
+                       MaMonitor -> sendSimple towho msg PldUser  >> return ()
+                       MaLink -> sendInterrupt towho msg  >> return ()
+                       MaLinkError -> case why of
+                                        SrNormal -> return ()
+                                        _ -> sendInterrupt towho msg  >> return ()
+    forward destinationnode msg = sendSimple (getGlobalFor destinationnode) msg PldAdmin
+    isProcessUp lpid = do p <- getProcess
+                          node <- liftIO $ readMVar (prNodeRef p)
+                          res <- liftIO $ atomically $ getProcessTableEntry node lpid
+                          case res of
+                            Nothing -> return False
+                            Just _ -> return True
+    addLocalMonitee gl monitor monitee action =
+         gl {glLinks = gdAddMonitee (glLinks gl) monitor (localFromPid monitee) }
+    addLocalMonitor gl monitor monitee action = 
+         gl {glLinks = gdAddMonitor (glLinks gl) monitee action (localFromPid monitor) }
+    addLocalNode gl monitor monitee action =
+         gl {glLinks = gdAddNode (glLinks gl) monitee (nodeFromPid monitor)}
+    broadcast nids msg = mapM_ (\p -> forkProcessWeak $ ((ptimeout 5000000 $ sendSimple (adminGetPid p ServiceProcessMonitor) msg PldAdmin) >> return ())) nids
+    handleProcessDown :: GlLinks -> ProcessId -> SignalReason -> ProcessM GlLinks
+    handleProcessDown global pid why = 
+                     do islocal <- isPidLocal pid
+                        mynid <- getSelfNode
+                        case Map.lookup pid global of
+                           Nothing -> return global
+                           Just (monitors,monitee,nodes) ->
+                               do mapM_ (\(tellwho,how) -> trigger (buildPidFromNodeId mynid tellwho) pid how why) (Map.keys monitors)
+                                  when (islocal)
+                                    (broadcast (Map.keys nodes) (GlProcessDown pid why))
+                                  mynid <- getSelfNode
+                                  return $ glExpungeProcess global pid mynid
+    service global = 
+         let
+             matchSignals cmd = 
+                case cmd of
+                  GlProcessDown pid why -> 
+                     do res <- handleProcessDown (glLinks global) pid why
+                        return $ global { glLinks = res}
+                  GlNodeDown nid -> let gl = glLinks global
+                                        aslist = Map.keys gl
+                                        pids = filter (\n -> nodeFromPid n == nid) aslist
+                                     in do res <- foldM (\g p -> handleProcessDown g p SrNoPing) gl pids
+                                           return $ global {glLinks = res}
+             matchSyncs cmd =
+                case cmd of
+                  GlRequestMonitoring monitee monitor action ->
+                       let s1 = addLocalMonitor global monitor monitee action
+                        in return (QteOK,s1)
+                  GlRequestMoniteeing pid towho -> 
+                       do live <- checkliveness pid
+                          case live of
+                              True -> let s1 = global {glLinks = gdAddNode (glLinks global) pid towho}
+                                       in return (QteOK,s1)
+                              False -> return (QteUnknownPid,global)
+             matchCommands cmd = 
+                case cmd of
+                  GlMonitor monitor monitee action -> 
+                    do ismoniteelocal <- isPidLocal monitee
+                       ismonitorlocal <- isPidLocal monitor
+                       case (ismoniteelocal,ismonitorlocal) of
+                         (True,True) -> do live <- checklivenessandtrigger monitor monitee action
+                                           case live of
+                                              True -> let s1 = addLocalMonitee global monitor monitee action
+                                                          s2 = addLocalMonitor s1 monitor monitee action
+                                                       in return (QteOK,s2)
+                                              False -> return (QteOK,global)
+                         (True,False) -> do live <- checklivenessandtrigger monitor monitee action
+                                            case live of
+                                              True -> let msg = GlRequestMonitoring monitee monitor action
+                                                       in do sync <- roundtripQuery PldAdmin (getGlobalFor monitor) msg -- TODO add timeout
+                                                             case sync of
+                                                               Left err -> return (err,global)
+                                                               Right QteOK -> let s1 = addLocalNode global monitor monitee action
+                                                                               in return (QteOK,s1)
+                                                               Right err -> return (err,global)
+                                              False -> return (QteOK,global)
+                         (False,True) -> let msg = GlRequestMoniteeing monitee (nodeFromPid monitor)
+                                          in do sync <- roundtripQuery PldAdmin (getGlobalFor monitee) msg -- TODO add timeout
+                                                case sync of
+                                                   Left err -> return (err,global)
+                                                   Right QteOK -> let s1 = addLocalMonitor global monitor monitee action 
+                                                                   in do monitorNode (nodeFromPid monitee)
+                                                                         return (QteOK,s1)
+                                                   Right QteUnknownPid -> do trigger monitor monitee action SrInvalid
+                                                                             return (QteOK,global)
+                                                   Right err -> return (err,global)
+                         (False,False) -> return (QteOther "Requesting monitoring by third party node",global)
+{-                  GlUnmonitor monitor monitee action -> 
+                    do ismoniteelocal <- isPidLocal monitee
+                       ismonitorlocal <- isPidLocal monitor
+                       case (ismoniteelocal,ismonitorlocal) of
+                         (True,True) -> 
+                         (False,False) -> return (QteOther "Requesting monitoring by third party node",global) -}
+          in receiveWait [match matchSignals,
+                          roundtripResponse PldAdmin matchCommands,
+                          roundtripResponse PldAdmin matchSyncs,
+                          matchUnknownThrow] >>= service
 
 data AmSpawn = AmSpawn (Closure (ProcessM ())) AmSpawnOptions deriving (Typeable)
 instance Binary AmSpawn where 
     put (AmSpawn c o) =put c >> put o
     get=get >>= \c -> get >>= \o -> return $ AmSpawn c o
 
-data AmSpawnOptions = AmSpawnNormal | AmSpawnPaused | AmSpawnMonitor (ProcessId,SignalType,MonitorAction) | AmSpawnLinked ProcessId
+data AmSpawnOptions = AmSpawnNormal | AmSpawnPaused | AmSpawnLinked ProcessId
 instance Binary AmSpawnOptions where
     put AmSpawnNormal = putWord8 0
     put AmSpawnPaused = putWord8 1
-    put (AmSpawnMonitor a) = putWord8 2 >> put a
     put (AmSpawnLinked a) = putWord8 3 >> put a
     get = getWord8 >>= 
            \w -> case w of
                    0 -> return AmSpawnNormal
                    1 -> return AmSpawnPaused
-                   2 -> get >>= \a -> return $ AmSpawnMonitor a
                    3 -> get >>= \a -> return $ AmSpawnLinked a
 
-data ProcessMonitorMessage = ProcessMonitorMessage ProcessId SignalType SignalReason deriving (Typeable)
-instance Binary ProcessMonitorMessage where
-   put (ProcessMonitorMessage pid st sr) = put pid >> put st >> put sr
-   get = do pid <- get
-            st <- get
-            sr <- get
-            return $ ProcessMonitorMessage pid st sr
 
 data AmSpawnUnpause = AmSpawnUnpause deriving (Typeable)
 instance Binary AmSpawnUnpause where
@@ -1388,12 +1764,19 @@ spawnRemote node clo = spawnRemoteAnd node clo AmSpawnNormal
 spawnRemoteUnpause :: ProcessId -> ProcessM ()
 spawnRemoteUnpause pid = send pid AmSpawnUnpause
 
+spawnRemoteLink :: NodeId -> Closure (ProcessM ()) -> ProcessM ProcessId
+spawnRemoteLink node clo = do mypid <- getSelfPid
+                              spawnRemoteAnd node clo (AmSpawnLinked mypid)
+
 spawnRemoteAnd :: NodeId -> Closure (ProcessM ()) -> AmSpawnOptions -> ProcessM ProcessId
 spawnRemoteAnd node clo opt = 
     do res <- roundtripQuery PldAdmin (adminGetPid node ServiceSpawner) (AmSpawn clo opt)
        case res of
          Left e -> throw $ TransmitException e
          Right pid -> return pid	
+
+-- TODO
+-- callRemote :: (Serializable a) => NodeId -> Closure (ProcessM a) -> ProcessM a
 
 startSpawnerService :: ProcessM ()
 startSpawnerService = serviceThread ServiceSpawner spawner
@@ -1405,10 +1788,6 @@ startSpawnerService = serviceThread ServiceSpawner spawner
                                         return (pid,())
                     AmSpawnPaused -> do pid <- spawn ((receiveWait [match (\AmSpawnUnpause -> return ())]) >> spawnWorker c)
                                         return (pid,())
-                    AmSpawnMonitor (monitorpid,typ,ac) -> 
-                                     do pid <- spawnAnd (spawnWorker c)
-                                                 (getSelfPid >>= \pid -> monitorProcess monitorpid pid typ ac) -- TODO this needs to be wrapped in case of error
-                                        return (pid,())
                     AmSpawnLinked monitorpid -> 
                                      do pid <- spawnAnd (spawnWorker c)
                                                  (linkProcess monitorpid)
@@ -1418,163 +1797,6 @@ startSpawnerService = serviceThread ServiceSpawner spawner
                                 Nothing -> (logS "SYS" LoCritical $ "Failed to invoke closure "++(show c)) --TODO it would be nice if this error could be propagated to the caller of spawnRemote, at the very least it should throw an exception so a linked process will be notified 
                                 Just q -> q
 
-linkProcess :: ProcessId -> ProcessM ()
-linkProcess p = do me <- getSelfPid
-                   monitorProcess me p SigProcessDown MaLinkError
-                   monitorProcess p me SigProcessDown MaLinkError
-
-monitorProcess :: ProcessId -> ProcessId -> SignalType -> MonitorAction -> ProcessM ()
-monitorProcess monitor monitee which how =
-      let msg = (AmMonitor which how monitor monitee True) in
-        do islocal <- isPidLocal monitor
-           res <- roundtripQuery PldAdmin (adminGetPid (nodeFromPid (if islocal then monitor else monitee)) ServiceGlobal) msg
-           case res of
-             Right True -> return ()
-             Right False -> throw $ TransmitException $ QteOther $ "Unknown error setting monitor in monitorProcess"
-             Left t -> throw $ TransmitException $ t
-
-data GlobalProcessEntry = GlobalProcessEntry
-     {
-          gpeMonitoring :: [(ProcessId,SignalType,MonitorAction)],
-          gpeMonitoredBy :: [(ProcessId,SignalType)]
-     } deriving (Show)
-
-type GlobalProcessRegistry = Map.Map LocalProcessId GlobalProcessEntry 
-
-data Global = Global
-     {
-          processRegistry :: GlobalProcessRegistry
-     } deriving (Show)
-
-startGlobalService :: ProcessM ()
-startGlobalService = serviceThread ServiceGlobal (service emptyGlobal)
-  where 
-    emptyGlobal = Global {processRegistry=Map.empty}
-    service global = 
-     let
-        matchMonitor2 = matchCoreHeaderless PldAdmin (const True) 
-                 (\a -> case a of
-                           (AmMonitor sigtype how monitor monitee propogate) -> setMonitor sigtype how monitor monitee propogate >>= return . snd)
-                
-        matchMonitor = roundtripResponse PldAdmin 
-                 (\a -> case a of
-                           (AmMonitor sigtype how monitor monitee propogate) -> setMonitor sigtype how monitor monitee propogate)
-        matchSignal = 
-             matchCoreHeaderless PldAdmin (const True) 
-                 (\a -> case a of
-                           (AmSignal pid sigtype why propogate) -> processSignal pid sigtype why propogate)
-        getAllPids g = concat $ map (\x -> map (\(p,_) -> p) (gpeMonitoredBy x)) (Map.elems (processRegistry g))
-        getInterestedPids g pid = 
-                 case Map.lookup (localFromPid pid) (processRegistry g) of
-                   Nothing -> []
-                   Just gpe -> map (\(pp,_,_) -> pp) (gpeMonitoring gpe) ++ map (\(pp,_) -> pp) (gpeMonitoredBy gpe)
-        installMonitee (bb,g) pid f@(monitor,sigtype) =
-            let adjustor (Just (GlobalProcessEntry a b)) = Just $ GlobalProcessEntry a (adjustor1 b)
-                adjustor Nothing = adjustor (Just $ GlobalProcessEntry [] [])
-                adjustor1 [] = [f]
-                adjustor1 (q@(hmon,hsig):r) = if hmon==monitor && hsig==sigtype
-                                                 then q:r
-                                                 else q:(adjustor1 r)
-                in (bb && ( Map.member (localFromPid pid) (processRegistry g)),g {processRegistry = Map.alter adjustor (localFromPid pid) (processRegistry g)})
-        installMonitor (bb,g) pid f@(monitee,sigtype,how) =
-            let adjustor (Just (GlobalProcessEntry a b)) = Just $ GlobalProcessEntry (adjustor1 a) b
-                adjustor Nothing = adjustor (Just $ GlobalProcessEntry [] [])
-                adjustor1 [] = [f]
-                adjustor1 (q@(hmon,hsig,how):r) = if hmon==monitee && hsig==sigtype
-                                                  then f:r -- or throw
-                                                  else q:(adjustor1 r)
-                in (bb && ( Map.member (localFromPid pid) (processRegistry g)), g {processRegistry = Map.alter adjustor (localFromPid pid) (processRegistry g)})
-
-        setMonitor sigtype how monitor monitee False =
-          do isMonitorLocal <- isPidLocal monitor
-             isMoniteeLocal <- isPidLocal monitee
-             if (not (isMonitorLocal || isMoniteeLocal))
-                then return (False,global)
-                else let t1 = if isMonitorLocal
-                                 then installMonitor (True,global) monitor (monitee,sigtype,how)
-                                 else (True,global)
-                         t2 = if isMoniteeLocal
-                                 then installMonitee t1 monitee (monitor,sigtype)
-                                 else t1
-                     in return t2
-        setMonitor sigtype how monitor monitee True = 
-          do (okay1,newg) <- setMonitor sigtype how monitor monitee False
-             isMonitorLocal <- isPidLocal monitor
-             isMoniteeLocal <- isPidLocal monitee        
-             if okay1
-                then if (not isMonitorLocal || not isMoniteeLocal)
-                        then let othernode = if isMonitorLocal 
-                                             then nodeFromPid monitee
-                                             else nodeFromPid monitor
-                                 other = adminGetPid othernode ServiceGlobal            
-                             in do res <- roundtripQuery PldAdmin other (AmMonitor sigtype how monitor monitee False)
-                                   case res of 
-                                     Right True -> return (True,newg)
-                                     _ -> return (False,global)
-                     else return (okay1,newg)
-                else return (False,global)
-        processSignal :: ProcessId -> SignalType -> SignalReason -> Bool -> ProcessM Global
-        processSignal pid SigProcessUp why False = 
-            do notify pid SigProcessUp why
-               return $ global { processRegistry = Map.insert (localFromPid pid) (GlobalProcessEntry {gpeMonitoring=[],gpeMonitoredBy=[]}) (processRegistry global) } 
-        processSignal pid SigProcessDown why False = let
-                 removeStuff :: GlobalProcessRegistry -> GlobalProcessRegistry
-                 removeStuff a = Map.map takeOut (Map.delete (localFromPid pid) a)
-                 takeOut q = q {gpeMonitoring = filter (\(x,_,_) -> x /= pid) (gpeMonitoring q), 
-                                gpeMonitoredBy = filter (\(x,_) -> x /= pid) (gpeMonitoredBy q)}
-               in
-               do notify pid SigProcessDown why
-                  return $ global {processRegistry = removeStuff $ processRegistry global}
-        processSignal pid sigtype why False =
-               notify pid sigtype why >> return global
-        processSignal pid sigtype why True = 
-             let 
-                 sign = (AmSignal pid sigtype why False)
-                 pids = if sigtype == SigProcessUp -- special case for process up: monitoring any process on a node will get signals for all new processups on that noe
-                           then getAllPids global
-                           else getInterestedPids global pid
-                 tellwho = filter ((/=) (nodeFromPid pid)) (nub $ map (nodeFromPid) $ pids)
-            in do 
-                  q <- processSignal pid sigtype why False
-                  res <- broadcast sign tellwho -- TODO handle error in some way
-                  return q
-        monitors x pid = filter (\(p,_,_) -> pid==p) (gpeMonitoring x)
-
- -- TODO in broadcast, make this concurrent, and log bad results; THIS LINE NEEDS A TIMEOUT OR SOMETHING; get timout value from config, or, even better, integrate directly into roundtripQuery variant
-        broadcast msg towho = foldM (\p x -> do query <- ptimeout 500000 (roundtripQuery PldAdmin (adminGetPid x ServiceGlobal) msg) :: ProcessM (Maybe (Either TransmitStatus Bool)) 
-                                                case query of
-                                                   Nothing -> return False
-                                                   Just (Left _) -> return False --log error
-                                                   Just (Right r) -> return r) True towho
-
-        sendNotification towho aboutwho typ how reason = 
-               let  
-                  abnormal = case reason of
-                               SrNormal -> False
-                               _ -> True
-                  sendAsynchException = 
-                           do p <- getProcess
-                              node <- liftIO $ readMVar (prNodeRef p)
-                              case Map.lookup towho (ndProcessTable node) of
-                                Nothing -> logS "SYS" LoInformation $ "Process linked from " ++ show aboutwho ++ " can't be notified because it's already gone"
-                                Just pte -> liftIO $ throwTo (pteThread pte)
-                                              (ProcessMonitorException aboutwho typ reason)
-               in
-               case how of
-                 MaLinkError -> when (abnormal) sendAsynchException
-                 MaLink -> sendAsynchException
-                 MaMonitor -> do
-                       towhom <- localServiceToPid towho
-                       res <- sendSimple towhom (ProcessMonitorMessage aboutwho typ reason) PldUser
-                       case res of
-                          QteOK -> return ()
-                          o -> logS "SYS" LoInformation $ "Process "++show towhom++" monitoring " ++ show aboutwho ++ " can't be notified: "++show o
-        notify pid signal reason = 
-               mapM_ (\(localpid,x) -> mapM_ (\(_,typ,how) -> sendNotification localpid pid typ how reason) (monitors x pid) ) (Map.toList (processRegistry global))
-        doit = do q <- receiveWait [matchSignal,matchMonitor,matchMonitor2,matchUnknownThrow]
---                  liftIO $ print q
-                  service q
-      in doit >> return ()
 
 ----------------------------------------------
 -- * Local registry
@@ -1674,7 +1896,7 @@ localRegistryQueryNodes nid =
     do cfg <- getConfig
        lrpid <- remoteRegistryPid nid
        let regMsg = LocalNodeQuery (cfgNetworkMagic cfg)
-       res <- roundtripQuery PldAdmin lrpid regMsg
+       res <- roundtripQuery PldAdmin lrpid regMsg -- TODO this needs a timeout
        case res of
          Left ts -> return Nothing
          Right (LocalNodeAnswer pi) -> return $ Just pi

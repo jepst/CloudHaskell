@@ -41,8 +41,8 @@ initialProcess "SLAVE" = do
 initialProcess "MASTER" = do
               mypid <- getSelfPid
   
-              (sendchan,recvchan) <- makeChannel
-              peers <- getPeersDynamic 50000
+              (sendchan,recvchan) <- newChannel
+              peers <- getPeers
               say ("Got peers: " ++ show peers)
               let slaves = findPeerByRole peers "SLAVE"
 
@@ -57,7 +57,7 @@ initialProcess "MASTER" = do
                               say $ show (v::Int)) [1..50]
 
 
-main = remoteInit "config" [Main.__remoteCallMetaData] initialProcess
+main = remoteInit (Just "config") [Main.__remoteCallMetaData] initialProcess
 
 
 

@@ -36,16 +36,16 @@ remoteCall
    |]
 
 channelCombiner cfg = case cfgArgs cfg of
-                         ["biased"] ->  combineChannelsBiased
-                         ["rr"] -> combineChannelsRR
+                         ["biased"] ->  combinePortsBiased
+                         ["rr"] -> combinePortsRR
                          _ -> error "Please specify 'biased' or 'rr' on the command line"
 
 initialProcess "NODE" = do
               mypid <- getSelfPid
               cfg <- getConfig  
 
-              (sendchan,recvchan) <- makeChannel
-              (sendchan2,recvchan2) <- makeChannel
+              (sendchan,recvchan) <- newChannel
+              (sendchan2,recvchan2) <- newChannel
 
               spawn $ mapM_ (sendChannel sendchan) [1..(26::Int)]
               spawn $ mapM_ (sendChannel sendchan2) ['A'..'Z']

@@ -1,16 +1,18 @@
 {-# LANGUAGE  DeriveDataTypeable #-}
-module Remote.Peer (PeerInfo,startDiscoveryService,getPeersStatic,getPeersDynamic,findPeerByRole) where
+module Remote.Peer (PeerInfo,startDiscoveryService,getPeers,getPeersStatic,getPeersDynamic,findPeerByRole) where
 
-import Network.Socket (defaultHints,sendTo,recvFrom,sClose,Socket,getAddrInfo,AddrInfoFlag(..),setSocketOption,addrFlags,addrSocketType,addrFamily,SocketType(..),Family(..),addrProtocol,SocketOption(..),AddrInfo,bindSocket,addrAddress,SockAddr(..),socket)
+import Network.Socket (defaultHints,sendTo,recv,sClose,Socket,getAddrInfo,AddrInfoFlag(..),setSocketOption,addrFlags,addrSocketType,addrFamily,SocketType(..),Family(..),addrProtocol,SocketOption(..),AddrInfo,bindSocket,addrAddress,SockAddr(..),socket)
 import Network.BSD (getProtocolNumber)
 import Control.Concurrent.MVar (takeMVar, newMVar, modifyMVar_)
-import Remote.Process (PeerInfo,spawnAnd,setDaemonic,TransmitStatus(..),TransmitException(..),PayloadDisposition(..),ptimeout,getSelfNode,sendSimple,cfgRole,cfgKnownHosts,cfgPeerDiscoveryPort,match,receiveWait,getSelfPid,getConfig,NodeId(..),PortId,ProcessM,ptry,localRegistryQueryNodes)
+import Remote.Process (PeerInfo,pingNode,makeNodeFromHost,spawnAnd,setDaemonic,TransmitStatus(..),TransmitException(..),PayloadDisposition(..),ptimeout,getSelfNode,sendSimple,cfgRole,cfgKnownHosts,cfgPeerDiscoveryPort,match,receiveWait,getSelfPid,getConfig,NodeId(..),PortId,ProcessM,ptry,localRegistryQueryNodes)
 import Control.Monad.Trans (liftIO)
 import Data.Typeable (Typeable)
 import Data.Maybe (catMaybes)
 import Data.Binary (Binary,get,put)
-import Control.Exception (bracket,ErrorCall(..),throw)
+import Control.Exception (try,bracket,ErrorCall(..),throw)
 import Data.List (nub)
+import Control.Monad (filterM)
+import qualified Data.Traversable as Traversable (mapM) 
 import qualified Data.Map as Map (keys,Map,unionsWith,insertWith,empty,lookup)
 
 data DiscoveryInfo = DiscoveryInfo
@@ -46,7 +48,7 @@ listenUdp port =
 	(\(sock,addr) -> do
 	    setSocketOption sock ReuseAddr 1
 	    bindSocket sock (addrAddress addr)
-	    (msg,_,_) <- recvFrom sock maxPacket
+	    msg <- recv sock maxPacket
             return msg
 	)
 
@@ -62,6 +64,15 @@ sendBroadcast port str
             return ()
 	)
 
+getPeers :: ProcessM PeerInfo
+getPeers = do a <- getPeersStatic
+              b <- getPeersDynamic 50000
+              verifyPeerInfo $ Map.unionsWith (\a b -> nub $ a ++ b) [a,b]
+
+verifyPeerInfo :: PeerInfo -> ProcessM PeerInfo
+verifyPeerInfo pi = Traversable.mapM verify1 pi
+        where verify1 = filterM pingNode -- TODO ping should require a response
+
 -- | Returns a PeerInfo, containing a list of known nodes ordered by role.
 -- This information is acquired by querying the local node registry on
 -- each of the hosts in the cfgKnownHosts entry in this node's config.
@@ -72,7 +83,7 @@ getPeersStatic = do cfg <- getConfig
                     let peers = cfgKnownHosts cfg
                     peerinfos <- mapM (localRegistryQueryNodes . hostToNodeId) peers
                     return $ Map.unionsWith (\a b -> nub $ a ++ b) (catMaybes peerinfos)
-     where hostToNodeId host = NodeId host 0
+     where hostToNodeId host = makeNodeFromHost host 0
 
 -- | Returns a PeerInfo, containing a list of known nodes ordered by role.
 -- This information is acquired by sending out a UDP broadcast on the
@@ -89,9 +100,9 @@ getPeersDynamic t =
                    do pid <- getSelfPid
                       cfg <- getConfig
                       -- TODO should send broacast multiple times in case of packet loss
-                      liftIO $ sendBroadcast (cfgPeerDiscoveryPort cfg) (show pid)
+                      liftIO $ try $ sendBroadcast (cfgPeerDiscoveryPort cfg) (show pid) :: ProcessM (Either IOError ())
                       responses <- liftIO $ newMVar []
-                      ptimeout t (receiveInfo responses)
+                      _ <- ptimeout t (receiveInfo responses)
                       res <- liftIO $ takeMVar responses
                       let all = map (\di -> (discRole di,[discNodeId di])) (nub res)
                       return $ foldl (\a (k,v) -> Map.insertWith (++) k v a ) Map.empty all

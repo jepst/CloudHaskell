@@ -8,33 +8,39 @@ for each dependency and
 for the main.
 run profiler as +RTS -p -RTS
 
-global registration:
-each process keeps connections open indefinitely
-each node knows all the other nodes it's connected to
-process registration traverses the whole node connection graph, registering it with each neighbor node until it is registered everywhere
-similar for de-registrations
-Upon creating a new connection to a node to which there has been no previous connection, 
-look at source for erlang:global?
+x. TaskM mock-up with k-means
+X. Translate Derek's k-means data generator
+3. write-up
+4. understand Erlang's global
+X. implement node pinging
+6. Easier Amazon launching, easier local network launching
+
+completely async send, returns ().
+
+limit use of SomeException. Create an "ignoreException" that throws out result, otherwise convert EsomException to something more precise
+
+imagine the case that a node crashes and restarts on the same port; how then shall we distinguish the processes of the new node fromthe old one? I therefore propose that NodeIds and ProcessIds be extended with an additional value, storing perhaps random value or the time that the node was started
+
+autogenerate graph of data dependencies - displayable with GnuPlot or whatever
+
+the foldl'-based code for receiving messages can be made more efficient by writing a custom foldl replacement
 
 to investigate: CML's first-class events; dynamics in Clean; "death by accidental complexity"; state charts; linear types; talk to Calvert about cost model of distributed computing; "session types" by Honda, AKA "communication types" by Nielson
 investigate LinearML, Idris, 
 
-setting up to use amazon EC2 or other cloud-systems, demo applications (k-means, convex hull, string alignment,Byzantine generals, GRIP graph reduction, )
+setting up to use amazon EC2 or other cloud-systems, demo applications (k-means, convex hull, string alignment,Byzantine generals, GRIP graph reduction, binomial option pricing)
 
-Rethinking of GLOBAL
---------------------
-CURRENT SYNCHRONOUS GLOBAL UPDATES CAN DEADLOCK  -- I think this can be fixed just be doing a forkProcess (or forkWeakProcess) from within the startGlobalService at the point before it does a roundtripQuery to its peers
-Explicit call to globalLink connects a node to the global network
-Global service 
-What happens to roundtripQueries that are talking to downed processes?
+GlobalService maintains a list of active locks with their owners. Locks are acquired in a roundtrip conversation. Attempts to reacquire the same lock succeed. Attempt of another process to acquire the same lock fails.
+A global lock is set by sending a lock broadcast to all known peers. If any of the peers fails, try again after a random backoff.
+To perform a global update: get a list of known nodes, set a lock, get another list of known nodes, and make sure they are the same (otherwise restart). This has the effect of serializing updates with node addings. Then broadcast the name update and release the lock.
 
-roundtripBroadcast :: (Serializable a, Serializable b) => PayloadDisposition -> [ProcessId] -> a -> ProcessM [b]
+GlobalService also maintains a list of KnownNodes, and their status. When two nodes connect for the first time, each must get a lock on all the nodes in its disjoint subset of known nodes. When both sides lock their nets, their KnownNodes are merged and synchronouslsy distributed to all nodes.
 
 Near future
 -------------
-the nature of roundtripQuery means that we should never do a roundtripQuery on a process that we aren't monitoring. Thus roundtripQuery should automatically start monitoring the other process and should return if it detects failure
+asynchronous send?
+document command lines; document getting setup on Amazon
 
-0. maybe we still want local name registration, as a per-node service or per-host services
 1. Figure out how to detect if a peer has gone down DONE: hIsEOF should be okay
 2. Make Global maintain fully-connected graph:
      a. Per-process connection pool, to avoid reconnecting tcp-ly on each send

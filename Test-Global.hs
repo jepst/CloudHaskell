@@ -5,7 +5,9 @@ import Remote.Init
 import Remote.Call
 import Remote.Process 
 import Remote.Peer
+import Remote.Encoding
 
+import Control.Exception (throw)
 import Data.Generics (Data)
 import Data.Maybe (fromJust)
 import Data.Typeable (Typeable)
@@ -13,6 +15,22 @@ import Control.Monad (when,forever)
 --import Control.Monad.Trans (liftIO)
 import Data.Char (isUpper)
 import Control.Concurrent (threadDelay)
+import Data.Binary
+
+data Ping = Ping ProcessId deriving (Data,Typeable)
+data Pong = Pong ProcessId deriving (Data,Typeable)
+instance Binary Ping where put = genericPut; get=genericGet
+instance Binary Pong where put = genericPut; get=genericGet
+
+ping :: ProcessM ()
+ping = 
+   do { self <- getSelfPid 
+      ; receiveWait [
+          match (\ (Pong partner) -> 
+           let response = Ping self
+            in send partner response)
+       ]
+      ; ping }
 
 remoteCall [d|
 
@@ -21,15 +39,6 @@ remoteCall [d|
            sayHi s = do liftIO $ threadDelay 500000
                         say $ "Hi there, " ++ show s ++ "!"
 
-           shiftLetter :: Int -> Char -> Char
-           shiftLetter n c = let alphabet = if isUpper c then ['A'..'Z'] else ['a'..'z']
-                                 letters = cycle alphabet
-                                 sletters = take (length alphabet) $ drop n letters
-                              in maybe c id (lookup c (zip letters sletters))
- 
-
-           rot13 :: String -> String
-           rot13 = map (shiftLetter 13)
 	|]
 
 while :: (Monad m) => m Bool -> m ()
@@ -45,15 +54,16 @@ initialProcess "MASTER" = do
 
               say $ "I am " ++ show mypid ++ " -- " ++ show (cfgArgs cfg)
 
-              peers <- getPeersStatic
+              peers <- getPeers
               let slaves = findPeerByRole peers "SLAVE"
               say $ "Found these slave nodes: " ++ show slaves
 
               say "Making slaves say Hi to me"
               mapM_ (\x -> setRemoteNodeLogConfig x (LogConfig LoTrivial (LtForward mynode) LfAll)) slaves
-              mapM_ (\x -> spawnRemoteAnd x (sayHi__closure mypid) (AmSpawnMonitor (mypid,SigProcessDown,MaMonitor))) slaves
+              mapM_ (\x -> do p <- spawnRemote x (sayHi__closure mypid) 
+                              monitorProcess mypid p MaMonitor) slaves
               
-              let matchMonitor = match (\(ProcessMonitorMessage aboutwho typ reason) -> say $ "Got completion messages: " ++ show (aboutwho,typ,reason))
+              let matchMonitor = match (\(ProcessMonitorException aboutwho reason) -> say $ "Got completion messages: " ++ show (aboutwho,reason))
               let waiting i = when (i>0) ((receiveWait [matchMonitor]) >> waiting (i-1))
 
               say "Waiting for completion messages from slaves..."
@@ -69,7 +79,7 @@ initialProcess "SLAVE" = do
               return ()
 initialProcess _ = liftIO $ putStrLn "Role must be MASTER or SLAVE"
 
-testSend = remoteInit "config" [Main.__remoteCallMetaData] initialProcess
+testSend = remoteInit (Just "config") [Main.__remoteCallMetaData] initialProcess
 
 main = testSend
 

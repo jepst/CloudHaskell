@@ -37,7 +37,7 @@ import Debug.Trace
 -- * Compile-time metadata
 ----------------------------------------------
 
-type RemoteCallMetaData = Lookup -> IO Lookup
+type RemoteCallMetaData = Lookup -> Lookup
 
 -- Language.Haskell.TH.recover seems to not work at all for syntax errors
 -- during splicing as I would expect. Not really sure what it's good for, 
@@ -74,7 +74,7 @@ type RemoteCallMetaData = Lookup -> IO Lookup
 --    must be registered when creating a node with 'Remote.Process.initNode'
 --    by calling 'registerCalls'. For example:
 --
---    > lookup <- registerCalls [Main.__remoteCallMetaData, Foobar.__remoteCallMetaData]
+--    > let lookup = registerCalls [Main.__remoteCallMetaData, Foobar.__remoteCallMetaData]
 --
 --    It is the programmer's responsibility to ensure that these names
 --    are visible at the location where they will be used.
@@ -146,9 +146,9 @@ buildMeta2 qdecs = do decs <- qdecs
                                                             return $ dec:v
                                                    _ -> return [dec]
                          _ -> return [dec]
-         putParams (fst:lst:[]) = AppT (AppT ArrowT fst) lst
-         putParams (fst:[]) = fst
-         putParams (fst:lst) = AppT (AppT ArrowT fst) (putParams lst)
+         putParams (afst:lst:[]) = AppT (AppT ArrowT afst) lst
+         putParams (afst:[]) = afst
+         putParams (afst:lst) = AppT (AppT ArrowT afst) (putParams lst)
          getParams typ = case typ of
                                   AppT (AppT ArrowT b) c -> b : getParams c
                                   b -> [b]
@@ -169,7 +169,7 @@ collectNames decs = foldl each [] decs
   where each entries dec = case dec of
                               (FunD name _) -> name:entries
                               (ValD (VarP name) _ _) -> name:entries
-                              otherwise -> entries
+                              _ -> entries
 
 patchDecls :: Q [Dec] -> Q [Dec]
 patchDecls decls = decls
@@ -190,7 +190,7 @@ buildMeta qdecls = do decls <- patchDecls qdecls
                       param <- newName "x"
                       let applies [] = varE param
                           applies [h] = appE (app2E mkentry (varE h) (litE $ stringL (reasonableNameModule h++nameBase h))) (varE param)
-                          applies (h:t) = app2Ei bind (app2E mkentry (varE h) (litE $ stringL (reasonableNameModule h++nameBase h))) (applies t)
+                          applies (h:t) = appE (app2E mkentry (varE h) (litE $ stringL (reasonableNameModule h++nameBase h))) (applies t)
                       let bodyq = normalB (applies names)
                       
                       sig <- sigD patq thetype
@@ -210,10 +210,10 @@ data Entry = Entry {
                entryFunRef :: Dynamic
              }
 
-registerCalls :: [RemoteCallMetaData] -> IO Lookup
-registerCalls [] = return empty
-registerCalls (h:rest) = do registered <- registerCalls rest
-                            h registered
+registerCalls :: [RemoteCallMetaData] -> Lookup
+registerCalls [] = empty
+registerCalls (h:rest) = let registered = registerCalls rest
+                          in h registered
 
 makeEntry :: (Typeable a) => Identifier -> a -> Entry
 makeEntry ident funref = Entry {entryName=ident, entryFunRef=toDyn funref}
@@ -221,12 +221,12 @@ makeEntry ident funref = Entry {entryName=ident, entryFunRef=toDyn funref}
 type IdentMap = Map.Map Identifier Entry
 data Lookup = Lookup { identMap :: IdentMap }
 
-putReg :: (Typeable a) => a -> Identifier -> Lookup -> IO Lookup
+putReg :: (Typeable a) => a -> Identifier -> Lookup -> Lookup
 putReg a i l = putEntry l a i
 
-putEntry :: (Typeable a) => Lookup -> a -> Identifier -> IO Lookup
-putEntry amap value name = do
-                             return $ Lookup {
+putEntry :: (Typeable a) => Lookup -> a -> Identifier -> Lookup
+putEntry amap value name = 
+                             Lookup {
                                 identMap = Map.insert name entry (identMap amap)
                              }
   where

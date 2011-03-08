@@ -19,7 +19,7 @@ import Data.Binary (Binary,encode,decode,Put,Get,put,get,putWord8,getWord8)
 import Control.Monad (liftM)
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as B (hPut,hGet,length)
-import Control.Exception (try,evaluate,SomeException)
+import Control.Exception (try,evaluate,ErrorCall)
 import Data.Int (Int64)
 import System.IO (Handle)
 import Data.Typeable (typeOf,Typeable)
@@ -60,9 +60,12 @@ hGetPayload h = do tl <- B.hGet h (fromIntegral baseLen)
     where baseLen = B.length (encode (0::PayloadLength))
 
 serialEncodePure :: (Serializable a) => a -> Payload
-serialEncodePure a = Payload {payloadType = encode $ show $ typeOf a,
-                                        payloadContent = encode a}
+serialEncodePure a = let encoding = encode a
+                      in encoding `seq` Payload {payloadType = encode $ show $ typeOf a,
+                                                 payloadContent = encoding}
 
+-- TODO I suspect that we will get better performance for big messages if let this be lazy
+-- see also serialDecode
 serialEncode :: (Serializable a) => a -> IO Payload
 serialEncode a = do encoded <- evaluate $ encode a -- this evaluate is actually necessary, it turns out; it might be better to just use strict ByteStrings
                     return $ Payload {payloadType = encode $ show $ typeOf a,
@@ -74,8 +77,7 @@ serialDecodePure a = (\id ->
                       if (decode $ payloadType a) == 
                             show (typeOf $ id undefined)
                          then 
-                                 let res = decode (payloadContent a)
-                                 in Just (id res)
+                                 Just (id $ decode (payloadContent a))
                          else Nothing ) id
 
 
@@ -85,7 +87,7 @@ serialDecode a = (\id ->
                             show (typeOf $ id undefined)
                          then do
                                  res <- try (evaluate $ decode (payloadContent a)) 
-                                    :: (Serializable a) => IO (Either SomeException a)
+                                    :: (Serializable a) => IO (Either ErrorCall a)
                                  case res of
                                   Left _ -> return $ Nothing
                                   Right v -> return $ Just $ id v

@@ -7,14 +7,14 @@ pids=""
 
 # ghc --make KMeans || exit 1
 
-for i in {1..nmappers}
+for i in $( seq 1 ${nmappers} )
 do
   ./KMeans -cfgRole=MAPPER &
   pid=$!
   pids="$pids $pid"
 done
 
-for i in {1..nreducers}
+for i in $( seq 1 ${nreducers} )
 do
   ./KMeans -cfgRole=REDUCER &
   pid=$!

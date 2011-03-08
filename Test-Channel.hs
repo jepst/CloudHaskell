@@ -21,7 +21,7 @@ import Control.Concurrent
 initialProcess "NODE" = do
               startGlobalService
 
-              (sendchan,recvchan) <- makeChannel
+              (sendchan,recvchan) <- newChannel
 
               a <- spawn $ do
                               sendChannel sendchan "hi"
