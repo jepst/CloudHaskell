@@ -7,7 +7,7 @@ import Data.Data (Data)
 import Remote.Encoding
 import Data.Binary
 
-data Vector = Vector Double Double deriving (Show,Read,Typeable,Data,Eq)
+data Vector = Vector !Double !Double deriving (Show,Read,Typeable,Data,Eq)
 instance Binary Vector where put (Vector a b) = put a>>put b
                              get = do a<-get
                                       b<-get

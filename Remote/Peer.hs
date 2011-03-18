@@ -4,7 +4,7 @@ module Remote.Peer (PeerInfo,startDiscoveryService,getPeers,getPeersStatic,getPe
 import Network.Socket (defaultHints,sendTo,recv,sClose,Socket,getAddrInfo,AddrInfoFlag(..),setSocketOption,addrFlags,addrSocketType,addrFamily,SocketType(..),Family(..),addrProtocol,SocketOption(..),AddrInfo,bindSocket,addrAddress,SockAddr(..),socket)
 import Network.BSD (getProtocolNumber)
 import Control.Concurrent.MVar (takeMVar, newMVar, modifyMVar_)
-import Remote.Process (PeerInfo,pingNode,makeNodeFromHost,spawnAnd,setDaemonic,TransmitStatus(..),TransmitException(..),PayloadDisposition(..),ptimeout,getSelfNode,sendSimple,cfgRole,cfgKnownHosts,cfgPeerDiscoveryPort,match,receiveWait,getSelfPid,getConfig,NodeId(..),PortId,ProcessM,ptry,localRegistryQueryNodes)
+import Remote.Process (PeerInfo,pingNode,makeNodeFromHost,spawnLocalAnd,setDaemonic,TransmitStatus(..),TransmitException(..),PayloadDisposition(..),ptimeout,getSelfNode,sendSimple,cfgRole,cfgKnownHosts,cfgPeerDiscoveryPort,match,receiveWait,getSelfPid,getConfig,NodeId(..),PortId,ProcessM,ptry,localRegistryQueryNodes)
 import Control.Monad.Trans (liftIO)
 import Data.Typeable (Typeable)
 import Data.Maybe (catMaybes)
@@ -64,6 +64,7 @@ sendBroadcast port str
             return ()
 	)
 
+-- | Find peers with 'getPeersStatic' and 'getPeersDynamic' and combines their results.
 getPeers :: ProcessM PeerInfo
 getPeers = do a <- getPeersStatic
               b <- getPeersDynamic 50000
@@ -133,7 +134,8 @@ waitForDiscovery delay
                          _ -> return False
 
 -- | Starts the discovery process, allowing this node to respond to
--- queries from getPeersDynamic.
+-- queries from getPeersDynamic. You don't want to call this yourself,
+-- as it's called for you in 'Remote.Init.remoteInit'
 startDiscoveryService :: ProcessM ()
-startDiscoveryService = spawnAnd service setDaemonic >> return ()
+startDiscoveryService = spawnLocalAnd service setDaemonic >> return ()
   where service = waitForDiscovery 0 >> service

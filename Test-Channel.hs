@@ -1,8 +1,9 @@
 {-# LANGUAGE TemplateHaskell,DeriveDataTypeable #-}
 module Main where	
 
-import Remote.Call (remoteCall,registerCalls,empty)
+import Remote.Call 
 import Remote.Process
+import Remote.Init
 import Remote.Encoding
 import Remote.Channel
 
@@ -19,11 +20,10 @@ import Data.Maybe (fromJust)
 import Control.Concurrent
 
 initialProcess "NODE" = do
-              startGlobalService
 
               (sendchan,recvchan) <- newChannel
 
-              a <- spawn $ do
+              a <- spawnLocal $ do
                               sendChannel sendchan "hi"
                               sendChannel sendchan "lumpy"
                               liftIO $ threadDelay 1000000
@@ -44,16 +44,6 @@ initialProcess "NODE" = do
 
 
 
-testSend = do 
-          lookup <- return empty
-          cfg <- readConfig True (Just "config")
-          node <- initNode cfg lookup
-          startLocalRegistry cfg False
-          forkAndListenAndDeliver node cfg
-          roleDispatch node initialProcess
-          waitForThreads node
-          threadDelay 500000
-
-main = testSend
+main = remoteInit (Just "config") [] initialProcess
 
 

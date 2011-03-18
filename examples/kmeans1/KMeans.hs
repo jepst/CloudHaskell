@@ -44,7 +44,7 @@ broadcast :: (Serializable a) => [ProcessId] -> a -> ProcessM ()
 broadcast pids dat = mapM_ (\pid -> send pid dat) pids
 
 multiSpawn :: [NodeId] -> Closure (ProcessM ()) -> ProcessM [ProcessId]
-multiSpawn nodes f = mapM (\node -> spawnRemote node f) nodes
+multiSpawn nodes f = mapM (\node -> spawn node f) nodes
 
 mapperProcess :: ProcessM ()
 mapperProcess = 
@@ -90,13 +90,7 @@ reducerProcess = let reduceProcess :: ([Cluster],[Cluster]) -> ProcessM ()
                      combineClusters (fstclst:res) clust = fstclst:(combineClusters res clust)
                   in reduceProcess ([],[]) >> return ()
 
-$(remoteCall [d|
-   mapperProcessRemote :: ProcessM ()
-   mapperProcessRemote = mapperProcess
-
-   reducerProcessRemote :: ProcessM ()
-   reducerProcessRemote = reducerProcess
-   |] )
+remotable ['mapperProcess, 'reducerProcess]
 
 readableShow [] = []
 readableShow ((_,one):rest) = (concat $ map (\(Vector x y) -> show x ++ " " ++ show y ++ "\n") one)++"\n\n"++readableShow rest
@@ -105,17 +99,15 @@ initialProcess "MASTER" =
   do peers <- getPeers
      let mappers = findPeerByRole peers "MAPPER"
      let reducers = findPeerByRole peers "REDUCER"
-     let numreducers = length reducers
-     let nummappers = length mappers
      points <- liftIO $ getPoints "kmeans-points"
      clusters <- liftIO $ getClusters "kmeans-clusters"
-     liftIO $ putStrLn $ "Got " ++ show (length points) ++ " points and "++show (length clusters)++" clusters"
-     liftIO $ putStrLn $ "Got peers: " ++ show peers
+     say $ "Got " ++ show (length points) ++ " points and "++show (length clusters)++" clusters"
+     say $ "Got peers: " ++ show peers
      mypid <- getSelfPid
      
-     mapperPids <- multiSpawn mappers mapperProcessRemote__closure
+     mapperPids <- multiSpawn mappers mapperProcess__closure
 
-     reducerPids <- multiSpawn  reducers reducerProcessRemote__closure
+     reducerPids <- multiSpawn  reducers reducerProcess__closure
      broadcast mapperPids reducerPids
      mapM_ (\(pid,chunk) -> send pid chunk) (zip (mapperPids) (split (length mapperPids) points))
 
@@ -124,15 +116,9 @@ initialProcess "MASTER" =
            res <- roundtripQueryMulti PldUser reducerPids () :: ProcessM [Either TransmitStatus [Cluster]]
            let newclusters = rights res
            let newclusters2 = (sortBy (\a b -> compare (clId a) (clId b)) (concat newclusters))
-           liftIO $ putStrLn $ show howmany
            if newclusters2 == clusters || howmany >= 5
               then do
-                     liftIO $ putStrLn $ "------------------Converged in " ++ show howmany ++ " iterations"
-                     -- liftIO $ print $ newclusters2
---                     pointmaps <- mapM (\pid -> do (Right m) <- roundtripQuery PldUser pid ""
---                                                   return (m::Map.Map Int [Vector])) reducerPids
---                     let pointmap = Map.unionsWith (++) pointmaps
---                     liftIO $ writeFile "kmeans-converged" $ readableShow (Map.toList pointmap)
+                     say $ "Converged in " ++ show howmany ++ " iterations"
                      respoints <- roundtripQueryMulti PldUser mapperPids () :: ProcessM [Either TransmitStatus (Map.Map Int [Vector])]
                      
                      liftIO $ writeFile "kmeans-converged" $ readableShow $ Map.toList $ Map.unionsWith (++) (rights respoints)

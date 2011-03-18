@@ -44,16 +44,14 @@ try()
    return 0
 }
 """
-data_gen_type="blobs 400"
+data_gen_type="rand 1000000 100"
+exec_args=["+RTS","-K20000000"]
 local_files = ["KMeans.hs","MakeData.hs","KMeansCommon.hs"]
-node_config_data = {"apts":"ghc cabal-install git-core",
-                    "cabals":"binary network stm mtl"}
+node_config_data = {"apts":"ghc cabal-install git-core libghc6-binary-dev libghc6-mtl-dev libghc6-network-dev libghc6-stm-dev"}
 node_config_script = script_header+"""
 cd
 try cfg.log "update apt repository" sudo apt-get -q -y update
 try cfg.log "install apt packages" sudo apt-get -q -y install %(apts)s
-try cfg.log "update cabal repository" cabal update
-try cfg.log "install cabal packages" cabal install %(cabals)s
 try cfg.log "retrieve git repository" git clone git://github.com/jepst/CloudHaskell.git
 cd CloudHaskell
 try cfg.log "configure local repository" cabal configure
@@ -236,13 +234,13 @@ def main():
 
 
     print "Starting worker nodes."
-    allinstances_spawn(keypairfile,options.username,mappers,["./KMeans","-cfgRole=MAPPER"])
-    allinstances_spawn(keypairfile,options.username,reducers,["./KMeans","-cfgRole=REDUCER"])
+    allinstances_spawn(keypairfile,options.username,mappers,["./KMeans","-cfgRole=MAPPER"]+exec_args)
+    allinstances_spawn(keypairfile,options.username,reducers,["./KMeans","-cfgRole=REDUCER"]+exec_args)
     time.sleep(15)
 
     print "Starting master node on "+master[0].public_dns_name+"."
     starttime=time.time()
-    allinstances_exec(keypairfile,options.username,master,["./KMeans","-cfgRole=MASTER"])
+    allinstances_exec(keypairfile,options.username,master,["./KMeans","-cfgRole=MASTER"]+exec_args)
     endtime=time.time()
     print "Completed computation in "+str(endtime-starttime)+" seconds."
 

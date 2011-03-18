@@ -9,18 +9,18 @@ pids=""
 
 for i in $( seq 1 ${nmappers} )
 do
-  ./KMeans -cfgRole=MAPPER &
+  ./KMeans -cfgRole=MAPPER  +RTS -K20000000&
   pid=$!
   pids="$pids $pid"
 done
 
 for i in $( seq 1 ${nreducers} )
 do
-  ./KMeans -cfgRole=REDUCER &
+  ./KMeans -cfgRole=REDUCER  +RTS -K20000000&
   pid=$!
   pids="$pids $pid"
 done
 
-./KMeans -cfgRole=MASTER
+./KMeans -cfgRole=MASTER  +RTS -K20000000
 
 kill $pids

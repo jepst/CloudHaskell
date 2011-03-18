@@ -1,10 +1,16 @@
 {-# LANGUAGE ExistentialQuantification,DeriveDataTypeable #-}
-module Remote.Channel (SendPort,ReceivePort,newChannel,sendChannel,receiveChannel,
+module Remote.Channel (
+                       -- * Basic typed channels
+                       SendPort,ReceivePort,newChannel,sendChannel,receiveChannel,
+
+                       -- * Combined typed channels
                        CombinedChannelAction,combinedChannelAction,
                        combinePortsBiased,combinePortsRR,mergePortsBiased,mergePortsRR,
+
+                       -- * Terminate a channel
                        terminateChannel) where
 
-import Remote.Process (ProcessM,send,setDaemonic,getProcess,prNodeRef,getNewMessageLocal,localFromPid,isPidLocal,TransmitException(..),TransmitStatus(..),msgPayload,spawn,ProcessId,Node,UnknownMessageException(..))
+import Remote.Process (ProcessM,send,setDaemonic,getProcess,prNodeRef,getNewMessageLocal,localFromPid,isPidLocal,TransmitException(..),TransmitStatus(..),msgPayload,spawnLocalAnd,ProcessId,Node,UnknownMessageException(..))
 import Remote.Encoding (getPayloadType,serialDecodePure,Serializable)
 
 import Data.List (foldl')
@@ -13,7 +19,7 @@ import Data.Typeable (Typeable)
 import Control.Exception (throw)
 import Control.Monad (when)
 import Control.Monad.Trans (liftIO)
-import Control.Concurrent.MVar (MVar,newEmptyMVar,takeMVar,withMVar,putMVar)
+import Control.Concurrent.MVar (MVar,newEmptyMVar,takeMVar,readMVar,putMVar)
 import Control.Concurrent.STM (STM,atomically,retry,orElse)
 import Control.Concurrent.STM.TVar (TVar,newTVarIO,readTVar,writeTVar)
 
@@ -32,10 +38,10 @@ instance Binary (SendPort a) where
 
 newChannel :: (Serializable a) => ProcessM (SendPort a, ReceivePort a)
 newChannel = do mv <- liftIO $ newEmptyMVar
-                pid <- spawn (body mv)
+                pid <- spawnLocalAnd (body mv) setDaemonic
                 return (SendPort pid,
                        ReceivePortSimple pid mv)
-     where body mv = setDaemonic >> liftIO (takeMVar mv)
+     where body mv = liftIO (takeMVar mv)
 
 sendChannel :: (Serializable a) => SendPort a -> a -> ProcessM ()
 sendChannel (SendPort pid) a = send pid a
@@ -43,8 +49,8 @@ sendChannel (SendPort pid) a = send pid a
 receiveChannel :: (Serializable a) => ReceivePort a -> ProcessM a
 receiveChannel rc = do p <- getProcess
                        channelCheckPids [rc]
-                       liftIO $ withMVar (prNodeRef p) (\node ->
-                            atomically $ receiveChannelImpl node rc)
+                       node <- liftIO $ readMVar (prNodeRef p)
+                       liftIO $ atomically $ receiveChannelImpl node rc
 
 receiveChannelImpl :: (Serializable a) => Node -> ReceivePort a -> STM a
 receiveChannelImpl node rc =

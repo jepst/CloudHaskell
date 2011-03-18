@@ -6,6 +6,7 @@ import Remote.Call
 import Remote.Process 
 import Remote.Peer
 import Remote.Encoding
+import Remote.Channel
 
 import Control.Exception (throw)
 import Data.Generics (Data)
@@ -16,6 +17,7 @@ import Control.Monad (when,forever)
 import Data.Char (isUpper)
 import Control.Concurrent (threadDelay)
 import Data.Binary
+import Control.Concurrent.MVar
 
 data Ping = Ping ProcessId deriving (Data,Typeable)
 data Pong = Pong ProcessId deriving (Data,Typeable)
@@ -32,14 +34,17 @@ ping =
        ]
       ; ping }
 
-remoteCall [d|
+foo :: ProcessM Int
+foo = receiveWait [match return]
+
 
            
-           sayHi :: ProcessId -> ProcessM ()
-           sayHi s = do liftIO $ threadDelay 500000
-                        say $ "Hi there, " ++ show s ++ "!"
+sayHi :: ProcessId -> ProcessM ()
+sayHi s = do liftIO $ threadDelay 500000
+             say $ "Hi there, " ++ show s ++ "!"
 
-	|]
+remotable ['sayHi]
+
 
 while :: (Monad m) => m Bool -> m ()
 while a = do f <- a
@@ -60,7 +65,7 @@ initialProcess "MASTER" = do
 
               say "Making slaves say Hi to me"
               mapM_ (\x -> setRemoteNodeLogConfig x (LogConfig LoTrivial (LtForward mynode) LfAll)) slaves
-              mapM_ (\x -> do p <- spawnRemote x (sayHi__closure mypid) 
+              mapM_ (\x -> do p <- spawn x (sayHi__closure mypid) 
                               monitorProcess mypid p MaMonitor) slaves
               
               let matchMonitor = match (\(ProcessMonitorException aboutwho reason) -> say $ "Got completion messages: " ++ show (aboutwho,reason))

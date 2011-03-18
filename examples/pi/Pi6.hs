@@ -71,12 +71,11 @@ countPairs offset count = let range = take count $ pairs offset
                                fy=y-0.5
                        in fx*fx + fy*fy > 0.25
 
-$(remoteCall [d|
-        mapper :: Int -> Int -> ProcessId -> ProcessM ()
-        mapper count offset master = let (numin,numout) = countPairs offset count in
+mapper :: Int -> Int -> ProcessId -> ProcessM ()
+mapper count offset master = let (numin,numout) = countPairs offset count in
                                         send master (numin,numout)
-             |])
-                                      
+
+remotable ['mapper]                                      
 
 longdiv :: Integer -> Integer -> Integer -> String
 longdiv _ 0 _ = "<inf>"
@@ -98,7 +97,7 @@ initialProcess "MASTER" = do
            say "Starting..."
            mapM_ (\(offset,nid) -> 
                    do say $ "Telling slave " ++ show nid ++ " to look at range " ++ show offset ++ ".." ++ show (offset+interval)
-                      spawnRemote nid (mapper__closure (interval-1) offset mypid)) (zip [0,interval..] slaves)
+                      spawn nid (mapper__closure (interval-1) offset mypid)) (zip [0,interval..] slaves)
            (x,y) <- receiveLoop (0,0) (length slaves)
            let est = estimatePi (fromIntegral x) (fromIntegral y)
            say $ "Done: " ++ longdiv (numerator est) (denominator est) 100
@@ -116,6 +115,6 @@ initialProcess "MASTER" = do
 
 initialProcess _ = error "Role must be SLAVE or MASTER"
 
-main = remoteInit "config" [Main.__remoteCallMetaData] initialProcess
+main = remoteInit (Just "config") [Main.__remoteCallMetaData] initialProcess
 
 

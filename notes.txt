@@ -9,83 +9,53 @@ for the main.
 run profiler as +RTS -p -RTS
 
 x. TaskM mock-up with k-means
-X. Translate Derek's k-means data generator
 3. write-up
 4. understand Erlang's global
-X. implement node pinging
 6. Easier Amazon launching, easier local network launching
 
-completely async send, returns ().
 
-limit use of SomeException. Create an "ignoreException" that throws out result, otherwise convert EsomException to something more precise
+imagine the case that a node crashes and restarts on the same port; how then shall we distinguish the processes of the new node fromthe old one? I therefore propose that NodeIds and ProcessIds be extended with an additional value, storing perhaps random value or the time that the node was started; The Rmt!! messages should contain complete Pid, not just LocalPid; receive will then check that the message was sent to the right node. This is especially important if I use the extended NodeId format that contains unique time of creation
 
-imagine the case that a node crashes and restarts on the same port; how then shall we distinguish the processes of the new node fromthe old one? I therefore propose that NodeIds and ProcessIds be extended with an additional value, storing perhaps random value or the time that the node was started
 
 autogenerate graph of data dependencies - displayable with GnuPlot or whatever
-
-the foldl'-based code for receiving messages can be made more efficient by writing a custom foldl replacement
 
 to investigate: CML's first-class events; dynamics in Clean; "death by accidental complexity"; state charts; linear types; talk to Calvert about cost model of distributed computing; "session types" by Honda, AKA "communication types" by Nielson
 investigate LinearML, Idris, 
 
-setting up to use amazon EC2 or other cloud-systems, demo applications (k-means, convex hull, string alignment,Byzantine generals, GRIP graph reduction, binomial option pricing)
+setting up to use amazon EC2 or other cloud-systems, 
 
 GlobalService maintains a list of active locks with their owners. Locks are acquired in a roundtrip conversation. Attempts to reacquire the same lock succeed. Attempt of another process to acquire the same lock fails.
 A global lock is set by sending a lock broadcast to all known peers. If any of the peers fails, try again after a random backoff.
 To perform a global update: get a list of known nodes, set a lock, get another list of known nodes, and make sure they are the same (otherwise restart). This has the effect of serializing updates with node addings. Then broadcast the name update and release the lock.
 
-GlobalService also maintains a list of KnownNodes, and their status. When two nodes connect for the first time, each must get a lock on all the nodes in its disjoint subset of known nodes. When both sides lock their nets, their KnownNodes are merged and synchronouslsy distributed to all nodes.
-
 Near future
 -------------
-asynchronous send?
-document command lines; document getting setup on Amazon
+Rename: spawn->spawnLocal, spawnRemote->spawn
 
-1. Figure out how to detect if a peer has gone down DONE: hIsEOF should be okay
-2. Make Global maintain fully-connected graph:
-     a. Per-process connection pool, to avoid reconnecting tcp-ly on each send
-     b. Each connection/disconnect to a remote node (sendRawRemote) and each and from a remote node (listenAndDeliver) will result in an AmSignal of type SigPeerDisconnect/SigPeerConnect
-     c. When Global gets such a message, it will see if the connection indicates a connection to a previously unknown peer. If so, perform a SYNCH. The synch is an operation performed synchronously on both ends within the the message sending framework, e.g. before the given message has been sent or received.
-     d. A synch is defined as a unionizing of global data: a union of known-peer sets, global process registry, promise registry, etc
-     e. during any update of global data, the change is performed synchronously to all peers in the known-peer of the given node
-     f. changes of global data include: global registering a process, noticing that a node has gone down
-     g. if a node notices that another node has gone down, it notifies all of its peers. All nodes can thus issue SigProcessDown signals for all processes that were running on the downed node
-4. Demo apps, as above
+the foldl'-based code for receiving messages can be made more efficient by writing a custom foldl replacement
+
+demo applications (k-means, convex hull, string alignment,Byzantine generals, GRIP graph reduction, binomial option pricing)
+limit use of SomeException. Create an "ignoreException" that throws out result, otherwise convert EsomException to something more precise
+document command lines; document getting setup on Amazon
+completely async send, returns ().
+
 admin services aren't very secure: sending them a bad message can crash them, as can happen when running different versions; more say behavior would be nice
-ensure reportage of ProcessDown in case of host downage
 make LogConfig Show/Read so we can stick it in the config file
 improve logging output, so that timestamp is only output at minute intervals and timestamp is properly aligned
-higher-level MapReduce functionality, based on promises, with automagical restart action on failure; also mechanisms for big disk file, that is spread around the cluster
-spawnSynch that actually returns a result
-use ServiceException for errors in the various service processes
-consider that situation that a throwTo ProcessMonitorException happens while the app is waiting for something else. It seems to me that the exception-handling primtives need to be rethought to allow the processmonitorexception, a non-error exception, to pass through unharmed
-bidirectional  process linkage; have queryDiscovery send its query several times with a delay inbetween
-add config options to automatically start system services
-roundtripResponse should have a bracket block that sends an "abort waiting" message to roundtripQuery, so it doesn't wait forever if the serve crashes
-there should be a MasterMonitor service that sets up a link to all other system processes and logs errors and restarts as necessary
+have queryDiscovery send its query several times with a delay inbetween
 let each Process have a "termination reason" set at exit, which can be retrieved by waitForProcess
-create github or darcs (code.haskell.org) repository
-keep a per-process table of both incoming and outgoing connections, to be used for name lookup
-the registration system ties into the notification system, so that the process notifies the registrar when it dies, which unregisters it. does the global register need to keep track of which process links which, or can it be done on a per-process basis? Likewise, registerProcessName needs to make sure that the given process is still alive; see http://www.erlang.org/doc/man/global.html
-my current thoughts on node regsitration are: there should be a config option that will set the node to use for registering; lookupProcessName and registerProcessName will use that node. If the setting is blank, it will look for a local registrar. This same setting can be used for other centralized settings, e.g. Skywriting-style promise-manager. Even better, this setting could be a LIST of nodes, which could be updated synchronously
-per Erlang, attempts to re-register a particular name as a different pid, or to re-register the same pid as a different process should cause an exception. How to keep the registry up-to-date? Like this: on startup, generate a random number, put it in Node; use that number as a prefix to all registrations/lookups. Actually, this is a bad idea, as it will break foreign (nonlocal) registration.
 sanity check to make sure that hostname and netmagic don't contain spaces
-global name lookup
-autopinging -- ping each node that we're connected to: if pings fail for a certain period of time, invoke custom user handler or send ProcessDown signals for all processes that were linked to something on that node; centralized pinging? This tendenacy to autoconnect to remote hosts can also be used to synchronize global names; this will need a connectionUp/connectionDown notification in sendRawRemote and listenAndDeliver
 when doing a remote spawn, the per-process logging variable should cause logging to be forwarded to caling terminal
 performance analysis service
+more flexible spawning options: start in paused state; logging forwarding; autolink; automonitor
 
 Tweaks:
 ------
+I Question the necessity of having a separate ping process for each monitored node. It's probably better if each node has a single pingreceipt process and a pingsender process. Pingsender keeps track of all nodes that are monitoring that node and sends their pings together. Pingreceipt expects to receive a ping from every node that is being watched within a particular timeframe.
+remove unecessary Pld specification from roundtripReceive
 move all the random message type definitions and their instances to a separate module
-replace all the readMVar prNodeRef with a higher level function
-cache results of lookupProcessName
-when registering a process under a name, the new name also goes into its mutable state, and is returned as part of its in pid in getSelfPid; the name, if present, does not influence comparison or message sending, but is printed out by show to aid in debugging
 instead of using Network.listenOn, I should use the lower level API to bind the particular interface named in Node.ndHostName, rather than the default interface
-provide more meaningful error message in matchUnknownThrow; use payloadGetType
-readConfig should more elegantly be able to handle errors, missing config files
 add exception handling wrapper to listenAndDeliver, as well as within it: e.g. handleCommSafer should catch exceptions and report to logger
-The Rmt!! messages should contain complete Pid, not just LocalPid; receive will then check that the message was sent to the right node
 use withSocketsDo for Windows compatibility
 multiple logging strategies: to local file, by message to process, by message to a given node; use mvar to prevent race condition
 timeout-bound variation of roundtrip suite
@@ -103,9 +73,7 @@ short-circuit sendRaw to deliver directly to queue when sending to localhost; th
 
 Future work:
 ------------
-make Closure a class with (at least) two instances: BasicClosure (corresponding to current Closure) and CompoundClosure, which is composed of two other closures, to be executed in sequence. Also, could have a BindClosure, correspondig to (>>=) with type like this: data BindClosure b = BC (Closure a) (Closure (a -> b)
 STRef-like process-local variables, process-local storage
-what happens if a thread dies while it still has unprocessed messages in its queue? Should the sender be signalled? (how does erlang do this?)
 support for user-defined signals, beyond SigProcessUp/Down
 Logload monitor should be able to keep track of # threads, CPU load, report to central; this can be done in Ping/Echo
 higher level abstractions: replace ProcessM with a class that encapsulates its primitives (whatever they may be), so that one could implement a similar system based on other? remote protoocls. Eg an AllocatorM class that depends on ProcessM
@@ -117,34 +85,6 @@ ability to serialize recursive data structures, e.g. tie-the-knot
 how to serialize GADTs/existentials
 
 
-Alternatives receive/match syntax:
-receiveWait handler
- where handler msg | "foo" <- msg = putStrLn "got a foo string"
-                   | (Message a b) <- msg = putStrLn "got a message"
-                   | s <- msg = putStrLn ("Got a non-foo string: " ++ s)
-                   | otherwise = putStrLn "got something else"
-
-ConversationM paradigm:
-conversati1 =do Hello <- receive 
-                send Hello2  
-                (Request filename) <- receive
-                stuff <- liftIO $ readFile filename 
-                send (Response stuff)
-
-
-
-
-CLOSURE IS A MONAD
-do a <- replicate__call 3 hi       -- a :: ClosureM (ClosureResult String)
-   grom__call                      -- grom__call :: ClosureM (BasicClosure ())
-   return a + 3                    --barf
---hmmmm.....
-(CompoundClosure (BindClosure "a" (BasicClosure "some__impl" (hi,3))) (BasicClosure "grom__impl" ()))
-
---impl questions:
---when is pinging done of remote nodes?
---how does process registry work? how do we synchronously
---notify all nodes?
 
 
 One can invision multi-type message receiving operating under several ways:
@@ -221,13 +161,6 @@ Polymorphic functions don't work in remoteCall blocks. I recommend writing wrapp
 myMap :: (Int -> String) -> [Int] -> [String]
 myMap = map
 
-Initialization options:
------------------------
-
-Each node should have a configured "role" which will determine what it does when it starts; there could be a mandatory table mapping role names to main procedures for each node; the default behavior would be passive
-network cookie (common for all nodes)
-listening port, name
-logging file and tolerance
 
 Process options:
 ---------------
@@ -235,16 +168,6 @@ Process options:
 forkIO vs forkOS
 Erlang-style linkage, ping frequency
 process style: synchronized return, pure functional invoke with asynch response, IO invoke, periodic invoke, persistent process (with channel), persistent with single-type channel, persistent with multi-type channel
-
-Questions
----------
-Why was SYB removed in GHC7?
-StableNames stable enough?
-What would a non-strict assembly language look like?
-
-
-BIG REDESIGN: add an additional type parameter to ProcessId and ProcessM, so that messages sent must be of one type
-this also greatly simplifies receive, since it can only return one type. General distributed code can be of type "ProcessM v a" but code that receives stuff would be "ProcessM Message a" or whatever you want to get. This would cause lots of big design changes.
 
 Things to talk about in write-up
 --------------------------------
