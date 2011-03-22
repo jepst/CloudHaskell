@@ -7,6 +7,7 @@ module Remote.Process  (
                        nullPid,getSelfPid,getSelfNode,isPidLocal,
 
                        -- * Message receiving
+                       expect,
                        MatchM,receive,receiveWait,receiveTimeout,
                        match,matchIf,matchUnknown,matchUnknownThrow,matchProcessDown,
 
@@ -27,6 +28,8 @@ module Remote.Process  (
                        spawnLocal,spawnLocalAnd,forkProcess,spawn,spawnAnd,spawnLink,unpause,
                        AmSpawnOptions(..),defaultSpawnOptions,MonitorAction(..),SignalReason(..),
                        ProcessMonitorException(..),linkProcess,monitorProcess,unmonitorProcess,withMonitor,pingNode,
+                       callRemote,callRemotePure,callRemoteIO,
+                       terminate,
 
                        -- * Config file
                        readConfig,emptyConfig,Config(..),getConfig,
@@ -48,18 +51,19 @@ module Remote.Process  (
                        -- * System service processes, not for general use
                        startSpawnerService,startLoggingService,startProcessMonitorService,startLocalRegistry,startFinalizerService,startNodeMonitorService,
                        standaloneLocalRegistry
-                       ) 
+                       )
                        where
 
 import Control.Concurrent (forkIO,ThreadId,threadDelay)
 import Control.Concurrent.MVar (MVar,newMVar, newEmptyMVar,isEmptyMVar,takeMVar,putMVar,modifyMVar_,readMVar)
-import Control.Exception (ErrorCall(..),throwTo,bracket,try,Exception,throw,evaluate,finally,SomeException,PatternMatchFail(..))
+import Prelude hiding (catch)
+import Control.Exception (ErrorCall(..),throwTo,bracket,try,Exception,throw,evaluate,finally,SomeException,PatternMatchFail(..),catch)
 import Control.Monad (foldM,when,liftM)
 import Control.Monad.Trans (MonadTrans,lift,MonadIO,liftIO)
 import Data.Binary (Binary,put,get,putWord8,getWord8)
 import Data.Char (isSpace,isDigit)
 import Data.Generics (Data)
-import Data.List (foldl', isPrefixOf,nub)
+import Data.List (isSuffixOf,foldl', isPrefixOf,nub)
 import Data.Maybe (listToMaybe,catMaybes,fromJust,isNothing)
 import Data.Typeable (Typeable)
 import Data.Unique (newUnique,hashUnique)
@@ -343,6 +347,9 @@ receive m = do p <- getProcess
       where mkMsgs p msgs = map (\(m,q) -> (m,do ps <- readTVar (prState p)
                                                  writeTVar (prState p) ps {prQueue = queueFromList q})) (exclusionList msgs)
 
+expect :: (Serializable a) => ProcessM a
+expect = receiveWait [match return]
+
 -- | Examines the message queue of the current process, matching each message against each of the
 -- provided message pattern clauses (typically provided by a function from the 'match' family). If
 -- a message matches, the corresponding handler is invoked and its result is returned. If no
@@ -406,21 +413,21 @@ matchUnknownThrow = do mb <- getMatch
 -- function in the first parameter of 'match', will be removed from the queue, at which point
 -- the user-provided function will be invoked.
 match :: (Serializable a) => (a -> ProcessM q) -> MatchM q ()
-match = matchCoreHeaderless PldUser (const True)
+match = matchCoreHeaderless  (const True)
 
 -- | Similar to 'match', but allows for additional criteria to be checked prior to message acceptance.
 -- Here, the first user-provided function operates as a filter, and the message will be accepted
 -- only if it returns True. Once it's been accepted, the second user-defined function is invoked,
 -- as in 'match'
 matchIf :: (Serializable a) => (a -> Bool) -> (a -> ProcessM q) -> MatchM q ()
-matchIf = matchCoreHeaderless PldUser
+matchIf = matchCoreHeaderless 
 
-matchCoreHeaderless :: (Serializable a) => PayloadDisposition -> (a -> Bool) -> (a -> ProcessM q) -> MatchM q ()
-matchCoreHeaderless pld f g = matchCore pld (\(a,b) -> b==(Nothing::Maybe ()) && f a)
+matchCoreHeaderless :: (Serializable a) => (a -> Bool) -> (a -> ProcessM q) -> MatchM q ()
+matchCoreHeaderless f g = matchCore (\(a,b) -> b==(Nothing::Maybe ()) && f a)
                                             (\(a,_) -> g a)
 
-matchCore :: (Serializable a,Serializable b) => PayloadDisposition -> ((a,Maybe b) -> Bool) -> ((a,Maybe b) -> ProcessM q) -> MatchM q ()
-matchCore pld cond body = 
+matchCore :: (Serializable a,Serializable b) => ((a,Maybe b) -> Bool) -> ((a,Maybe b) -> ProcessM q) -> MatchM q ()
+matchCore cond body = 
         do mb <- getMatch
            doit mb
  where 
@@ -452,6 +459,9 @@ instance Exception UnknownMessageException
 
 data ServiceException = ServiceException String deriving (Show,Typeable)
 instance Exception ServiceException
+
+data ProcessTerminationException = ProcessTerminationException deriving (Show,Typeable)
+instance Exception ProcessTerminationException
 
 data TransmitStatus = QteOK
                     | QteUnknownPid
@@ -561,11 +571,12 @@ runLocalProcess node fun =
           exceptionHandler e p = let shown = show e in
                 notifyProcessDown (p) (SrException shown) >>
                  (try (logI node  (prPid p) "SYS" LoCritical (concat ["Process got unhandled exception ",shown]))::IO(Either SomeException ())) >> return () --ignore error
-          exceptionCatcher p fun = do notifyProcessUp (p)
-                                      res <- try fun
-                                      case res of
-                                        Left e -> exceptionHandler (e::SomeException) p
-                                        Right a -> notifyProcessDown (p) SrNormal >> return a
+          exceptionCatcher p fun = 
+                 do notifyProcessUp (p)
+                    res <- try (fun `catch` (\ProcessTerminationException -> return ()))
+                    case res of
+                      Left e -> exceptionHandler (e::SomeException) p
+                      Right a -> notifyProcessDown (p) SrNormal >> return a
           runner okay node passProcess = do
                   p <- takeMVar passProcess
                   let init = do death <- newEmptyMVar
@@ -611,6 +622,8 @@ runLocalProcess node fun =
 -- To make this work with a ptimeout but still be able to return martial results,
 -- they need to be stored in an MVar. Also, like roundtipQuery, this should have
 -- two variants: a flavor that establishes monitors, and a timeout-based flavor.
+-- This also needs an ASYNC variant, that will send data simultaneously, from multiple subprocesses
+-- and finally, it needs a POLY variant, of type Pld -> [(ProcessId,a)] -> ProcessM [Either TransmitStatus b]
 roundtripQueryMulti :: (Serializable a,Serializable b) => PayloadDisposition -> [ProcessId] -> a -> ProcessM [Either TransmitStatus b]
 roundtripQueryMulti pld pids dat = -- TODO timeout
                       let 
@@ -632,7 +645,7 @@ roundtripQueryMulti pld pids dat = -- TODO timeout
                                                    then do newmap <- receiveWait [matcher c]
                                                            receiving newmap
                                                    else return c
-                                 matcher c = matchCore pld (\(_,h) -> case h of
+                                 matcher c = matchCore (\(_,h) -> case h of
                                                                        Just a -> (msgheaderConversationId a,msgheaderSender a) `elem` convopids
                                                                        Nothing -> False)
                                                          (\(b,Just h) -> 
@@ -643,7 +656,9 @@ roundtripQueryMulti pld pids dat = -- TODO timeout
 
 roundtripQuery :: (Serializable a, Serializable b) => PayloadDisposition -> ProcessId -> a -> ProcessM (Either TransmitStatus b)
 roundtripQuery pld pid dat =
-  withMonitor pid $ roundtripQueryImpl 0 pld pid dat
+  case pld of
+      PldAdmin -> roundtripQueryImpl 0 pld pid dat -- TODO this is a hack. we should be able to monitor admin pids
+      _ -> withMonitor pid $ roundtripQueryImpl 0 pld pid dat
 
 roundtripQueryUnsafe :: (Serializable a, Serializable b) => PayloadDisposition -> ProcessId -> a -> ProcessM (Either TransmitStatus b)
 roundtripQueryUnsafe pld pid dat = 
@@ -656,7 +671,7 @@ roundtripQueryImpl time pld pid dat =
        sender <- getSelfPid
        res <- mysend pid dat (Just RoundtripHeader {msgheaderConversationId = convId,msgheaderSender = sender,msgheaderDestination = pid}) pld
        case res of
-            QteOK -> receiver [matchCore pld (\(_,h) -> case h of
+            QteOK -> receiver [matchCore (\(_,h) -> case h of
                                                             Just a -> msgheaderConversationId a == convId && msgheaderSender a == pid
                                                             Nothing -> False) (return . Right . fst),
                                   matchProcessDown pid ((return . Left . QteNetworkError) "Remote partner unavailable")]
@@ -675,22 +690,27 @@ roundtripQueryImpl time pld pid dat =
                                    Nothing -> return (Left QteConnectionTimeout)
                                    Just a -> return a
 
-roundtripResponse :: (Serializable a, Serializable b) => PayloadDisposition -> (a -> ProcessM (b,q)) -> MatchM q ()
-roundtripResponse pld f =
-       matchCore pld (\(_,h)->conditional h) transformer
+roundtripResponse :: (Serializable a, Serializable b) => (a -> ProcessM (b,q)) -> MatchM q ()
+roundtripResponse f = roundtripResponseAsync myf
+     where myf inp verf = do (resp,ret) <- f inp
+                             verf resp
+                             return ret
+
+roundtripResponseAsync :: (Serializable a, Serializable b) => (a -> (b -> ProcessM ()) -> ProcessM q) -> MatchM q ()
+roundtripResponseAsync f =
+       matchCore (\(_,h)->conditional h) transformer
    where conditional :: Maybe RoundtripHeader -> Bool
          conditional a = case a of
                            Just _ -> True
                            Nothing -> False
          transformer (m,Just h) = 
-                         do 
-                            selfpid <- getSelfPid
-                            (a,q) <- f m
-                            res <- sendTry (msgheaderSender h) a (Just RoundtripHeader {msgheaderSender=msgheaderDestination h,msgheaderDestination = msgheaderSender h,
-                                                                                 msgheaderConversationId=msgheaderConversationId h}) PldUser
-                            case res of
-                              QteOK -> return q
-                              _ -> throw $ TransmitException res
+                            let sender b =
+                                 do res <- sendTry (msgheaderSender h) b (Just RoundtripHeader {msgheaderSender=msgheaderDestination h,msgheaderDestination = msgheaderSender h,msgheaderConversationId=msgheaderConversationId h}) PldUser
+                                    case res of
+                                      QteOK -> return ()
+                                      _ -> throw $ TransmitException res -- TODO this should behave nicer: send a log message, don't throw
+
+                             in f m sender
 
 data RoundtripHeader = RoundtripHeader
     {
@@ -1049,6 +1069,10 @@ ptry f = do p <- getProcess
               Left e -> return $ Left e
               Right (newp,newanswer) -> ProcessM (\_ -> return (newp,Right newanswer))
 
+pcatch :: Exception e => ProcessM a -> (e -> ProcessM a) -> ProcessM a
+pcatch code handler = do p <- getProcess
+                         liftIO $ catch (liftM snd $ runProcessM code p) (\e -> liftM snd $ runProcessM (handler e) p)
+                         
 ptimeout :: Int -> ProcessM a -> ProcessM (Maybe a)
 ptimeout t f = do p <- getProcess
                   res <- liftIO $ System.Timeout.timeout t (runProcessM f p)
@@ -1444,7 +1468,7 @@ startNodeMonitorService = serviceThread ServiceNodeMonitor (service Map.empty)
                                                  else do spawnLocalAnd (listenaction nid mypid) setDaemonic
                                                          return $ Map.insert nid (0) state
                                                  
-       in receiveWait [roundtripResponse PldAdmin matchCommand,
+       in receiveWait [roundtripResponse matchCommand,
                        match matchSignal,
                        matchUnknownThrow] >>= service
         
@@ -1891,14 +1915,19 @@ startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyG
                                           in return (QteOK,s1)
                          (False,False) -> return (QteOther "Requesting unmonitoring by third party node",global) 
           in receiveWait [match matchSignals,
-                          roundtripResponse PldAdmin matchCommands,
-                          roundtripResponse PldAdmin matchSyncs,
+                          roundtripResponse matchCommands,
+                          roundtripResponse matchSyncs,
                           matchUnknownThrow] >>= service
 
 data AmSpawn = AmSpawn (Closure (ProcessM ())) AmSpawnOptions deriving (Typeable)
 instance Binary AmSpawn where 
     put (AmSpawn c o) =put c >> put o
     get=get >>= \c -> get >>= \o -> return $ AmSpawn c o
+data AmCall = AmCall (Closure Payload) deriving (Typeable)
+instance Binary AmCall where
+    put (AmCall clo) = put clo
+    get = do c <- get
+             return $ AmCall c
 
 data AmSpawnOptions = AmSpawnOptions 
         { 
@@ -1924,6 +1953,9 @@ instance Binary AmSpawnUnpause where
 spawn :: NodeId -> Closure (ProcessM ()) -> ProcessM ProcessId
 spawn node clo = spawnAnd node clo defaultSpawnOptions
 
+terminate :: ProcessM a
+terminate = throw ProcessTerminationException
+
 -- | If a remote process has been started in a paused state with 'spawnAnd' ,
 -- it will be running but inactive until unpaused. Use this function to unpause
 -- such a function. It has no effect on processes that are not paused or that
@@ -1940,36 +1972,67 @@ spawnLink node clo = do mypid <- getSelfPid
 -- | A variant of spawnRemote that allows greater control over how the remote process is started.
 spawnAnd :: NodeId -> Closure (ProcessM ()) -> AmSpawnOptions -> ProcessM ProcessId
 spawnAnd node clo opt = 
-    do res <- roundtripQueryUnsafe PldAdmin (adminGetPid node ServiceSpawner) (AmSpawn clo opt)
+    do res <- roundtripQueryUnsafe PldAdmin (adminGetPid node ServiceSpawner) (AmSpawn clo opt) 
        case res of
          Left e -> throw $ TransmitException e
          Right pid -> return pid	
 
--- TODO
--- callRemote :: (Serializable a) => NodeId -> Closure (ProcessM a) -> ProcessM a
+callRemote :: (Serializable a) => NodeId -> Closure (ProcessM a) -> ProcessM a
+callRemote node clo = callRemoteImpl node clo
+
+callRemoteIO :: (Serializable a) => NodeId -> Closure (IO a) -> ProcessM a
+callRemoteIO node clo = callRemoteImpl node clo
+
+callRemotePure :: (Serializable a) => NodeId -> Closure a -> ProcessM a
+callRemotePure node clo = callRemoteImpl node clo
+
+callRemoteImpl :: (Serializable a) => NodeId -> Closure b -> ProcessM a
+callRemoteImpl node clo = 
+    let newclo = makePayloadClosure clo
+     in case newclo of
+          Nothing -> throw $ TransmitException QteUnknownCommand
+          Just plclo ->
+               do res <- roundtripQuery PldAdmin (adminGetPid node ServiceSpawner) (AmCall plclo)
+                  case res of
+                     Right (Just mval) -> 
+                       do val <- liftIO $ serialDecode mval
+                          case val of
+                             Just a -> return a
+                             _ -> throw $ TransmitException QteUnknownCommand
+                     Left e -> throw $ TransmitException e
+                     _ -> throw $ TransmitException QteUnknownCommand
+
 
 startSpawnerService :: ProcessM ()
 startSpawnerService = serviceThread ServiceSpawner spawner
-   where spawner = receiveWait [matchSpawnRequest,matchUnknownThrow] >> spawner
+   where spawner = receiveWait [matchSpawnRequest,matchCallRequest,matchUnknownThrow] >> spawner
+         callWorker c responder = do a <- invokeClosure c --TODO this needs exception trapping
+                                     case a of
+                                        Nothing -> responder Nothing
+                                        Just pl -> responder (Just pl)
          spawnWorker c = do a <- invokeClosure c
                             case a of
                                 Nothing -> (logS "SYS" LoCritical $ "Failed to invoke closure "++(show c)) --TODO it would be nice if this error could be propagated to the caller of spawnRemote, at the very least it should throw an exception so a linked process will be notified 
                                 Just q -> q
-         matchSpawnRequest = roundtripResponse PldAdmin 
-               (\(AmSpawn c opt) -> 
-                   let 
-                      pausePrelude = case amsoPaused opt of
-                                         False -> return ()
-                                         True -> receiveWait [match (\AmSpawnUnpause -> return ())]
-                      linkPostlude = case amsoLink opt of
+         matchCallRequest = roundtripResponseAsync 
+               (\cmd sender -> case cmd of
+                    AmCall clo -> spawnLocal (callWorker clo sender) >> return ())
+         matchSpawnRequest = roundtripResponse 
+               (\cmd -> case cmd of
+                    AmSpawn c opt -> 
+                      let 
+                        pausePrelude = case amsoPaused opt of
+                                            False -> return ()
+                                            True -> receiveWait [match (\AmSpawnUnpause -> return ())]
+                        linkPostlude = case amsoLink opt of
                                             Nothing -> return ()
                                             Just pid -> linkProcess pid
-                      monitorPostlude = case amsoMonitor opt of
-                                           Nothing -> return ()
-                                           Just (pid,ma) -> do mypid <- getSelfPid
-                                                               monitorProcess pid mypid ma
-                    in do newpid <- spawnLocalAnd (pausePrelude >> spawnWorker c) (linkPostlude >> monitorPostlude)
-                          return (newpid,()))
+                        monitorPostlude = case amsoMonitor opt of
+                                            Nothing -> return ()
+                                            Just (pid,ma) -> do mypid <- getSelfPid
+                                                                monitorProcess pid mypid ma
+                      in do newpid <- spawnLocalAnd (pausePrelude >> spawnWorker c) (linkPostlude >> monitorPostlude)
+                            return (newpid,()))
 
 
 ----------------------------------------------
@@ -2088,7 +2151,7 @@ startLocalRegistry :: Config -> Bool -> IO TransmitStatus
 startLocalRegistry cfg waitforever = startit
  where
   regConfig = cfg {cfgListenPort = cfgLocalRegistryListenPort cfg, cfgNetworkMagic=localRegistryMagicMagic, cfgRole = localRegistryMagicRole}
-  handler tbl = receiveWait [roundtripResponse PldAdmin (registryCommand tbl)] >>= handler
+  handler tbl = receiveWait [roundtripResponse (registryCommand tbl)] >>= handler
   emptyNodeData = LocalNodeData {ldmRoles = Map.empty}
   lookup tbl magic role = case Map.lookup magic tbl of
                                  Nothing -> Nothing
@@ -2149,12 +2212,19 @@ makeClosure fun env = do
                          enc <- liftIO $ serialEncode env 
                          return $ Closure fun enc
 
+makePayloadClosure :: Closure a -> Maybe (Closure Payload)
+makePayloadClosure (Closure name arg) = 
+                case isSuffixOf "__impl" name of
+                  False -> Nothing
+                  True -> Just $ Closure (name++"Pl") arg
+
 invokeClosure :: (Typeable a) => Closure a -> ProcessM (Maybe a)
-invokeClosure (Closure name arg) = (\id ->
+invokeClosure (Closure name arg) = 
+           (\id ->
                 do node <- getLookup
                    res <- sequence [pureFun node,ioFun node,procFun node]
                    case catMaybes res of
-                      (a:b) -> return $ Just a
+                      (a:_) -> return $ Just a
                       _ -> return Nothing ) id
    where pureFun node = case getEntryByIdent node name of
                           Nothing -> return Nothing

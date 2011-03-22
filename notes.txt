@@ -30,7 +30,7 @@ To perform a global update: get a list of known nodes, set a lock, get another l
 
 Near future
 -------------
-Rename: spawn->spawnLocal, spawnRemote->spawn
+clean up cheaty mkName in Remote.Call where possible
 
 the foldl'-based code for receiving messages can be made more efficient by writing a custom foldl replacement
 

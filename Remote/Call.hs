@@ -14,7 +14,7 @@ module Remote.Call (
 -- * Re-exports
          Payload,
          Closure(..),
-         liftIO,serialEncodePure,serialDecode
+         liftIO,serialEncode,serialEncodePure,serialDecode
         ) where
 
 import Language.Haskell.TH
@@ -25,7 +25,7 @@ import Data.Dynamic (toDyn,Dynamic,fromDynamic,dynTypeRep)
 import Data.Generics (Data)
 import Data.Typeable (typeOf,Typeable)
 import Data.Binary (Binary)
-import Remote.Encoding (Payload,serialDecode,serialEncodePure,Serializable)
+import Remote.Encoding (Payload,serialDecode,serialEncode,serialEncodePure,Serializable)
 import Control.Monad.Trans (liftIO)
 import Control.Monad (liftM)
 import Remote.Closure (Closure(..))
@@ -68,21 +68,44 @@ remotable names =
           makeDec loc (aname,atype) =
               let
                  implName = mkName (nameBase aname ++ "__impl") 
+                 implPlName = mkName (nameBase aname ++ "__implPl")
                  implFqn = loc_module loc ++"." ++ nameBase aname ++ "__impl"
                  closureName = mkName (nameBase aname ++ "__closure")
                  paramnames = map (\x -> 'a' : show x) [1..(length (init arglist))]
                  paramnamesP = (map (varP . mkName) paramnames)
                  paramnamesE = (map (varE . mkName) paramnames)
                  closurearglist = init arglist ++ [processmtoclosure (last arglist)]
+                 implarglist = payload : [toPayload (last arglist)]
+                 toProcessM a = (AppT (ConT (mkName "Remote.Process.ProcessM")) a)
+                 toPayload x = case funtype of
+                                  0 -> case x of
+                                        (AppT (ConT n) _) -> (AppT (ConT n) payload)
+                                        _ -> toProcessM payload
+                                  _ -> toProcessM payload
                  processmtoclosure (x) =  (AppT (ConT (mkName "Remote.Call.Closure")) x)
                  applyargs f [] = f
                  applyargs f (l:r) = applyargs (appE f l) r
-
-                 payload = [t| Remote.Encoding.Payload |]
+                 funtype = case last arglist of
+                              (AppT (ConT process) _) | show process == "Remote.Process.ProcessM" -> 0
+                                                      | show process == "GHC.Types.IO" -> 1
+                              _ -> 2
+                 payload = ConT ( mkName "Remote.Encoding.Payload")
                  just a = conP (mkName "Just") [a]
                  errorcall = [e| Prelude.error |]
                  liftio = [e| Control.Monad.Trans.liftIO |]
+                 returnf = [e| Prelude.return |]
+                 asProcessM x = case funtype of
+                                  0 -> x
+                                  1 -> case x of
+                                         (AppT (ConT _) a) -> AppT (ConT (mkName "Remote.Process.ProcessM")) a
+                                         _ -> AppT (ConT (mkName "Remote.Process.ProcessM")) x
+                                  2 -> AppT (ConT (mkName "Remote.Process.ProcessM")) x
+                 lifter x = case funtype of
+                                0 -> x
+                                1 -> appE liftio x
+                                _ -> appE returnf x
                  decodecall = [e| Remote.Encoding.serialDecode |]
+                 encodecallio = [e| Remote.Encoding.serialEncode |]
                  encodecall = [e| Remote.Encoding.serialEncodePure |]
                  closurecall = conE (mkName "Remote.Call.Closure")
                  closuredec = sigD closureName (return $ putParams closurearglist)
@@ -90,20 +113,23 @@ remotable names =
                                         (normalB (appE (appE closurecall (litE (stringL implFqn))) (appE encodecall (tupE paramnamesE))))
                                         []
                                        ]
-                 impldec = sigD implName (appT (appT arrowT payload) (return $ last arglist))
+                 impldec = sigD implName (appT (appT arrowT (return payload)) (return $ asProcessM $ last arglist))
                  impldef = funD implName [clause [varP (mkName "a")]
                                          (normalB (doE [bindS (varP (mkName "res")) (appE liftio (appE decodecall (varE (mkName "a")))),
                                                        noBindS (caseE (varE (mkName "res"))
-                                                             [match (just (tupP paramnamesP)) (normalB (applyargs (varE aname) paramnamesE)) [],
+                                                             [match (just (tupP paramnamesP)) (normalB (lifter (applyargs (varE aname) paramnamesE))) [],
                                                               match wildP (normalB (appE (errorcall) (litE (stringL ("Bad decoding in closure splice of "++nameBase aname))))) []])
                                                       ]))
                                          []]
+
+                 implPldec = sigD implPlName (return $ putParams implarglist)
+                 implPldef = funD implPlName [clause [varP (mkName "a")]
+                                         (normalB (doE [bindS (varP (mkName "res")) ( (appE (varE implName) (varE (mkName "a")))),
+                                                       noBindS (appE liftio (appE encodecallio (varE (mkName "res")))) ] )) [] ] 
                  arglist = getParams atype
               in
-                 case last arglist of
-                    (AppT (ConT process) _) | show process == "Remote.Process.ProcessM" ->
-                        ([closuredec,closuredef,impldec,impldef],[aname,implName])
-                    _ -> ([],[])
+                 case funtype of
+                      _ -> ([closuredec,closuredef,impldec,impldef,implPldec,implPldef],[aname,implName,implPlName])
           getType name = 
              do info <- reify name
                 case info of 

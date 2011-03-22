@@ -67,7 +67,7 @@ sendBroadcast port str
 -- | Find peers with 'getPeersStatic' and 'getPeersDynamic' and combines their results.
 getPeers :: ProcessM PeerInfo
 getPeers = do a <- getPeersStatic
-              b <- getPeersDynamic 50000
+              b <- getPeersDynamic 500000
               verifyPeerInfo $ Map.unionsWith (\a b -> nub $ a ++ b) [a,b]
 
 verifyPeerInfo :: PeerInfo -> ProcessM PeerInfo

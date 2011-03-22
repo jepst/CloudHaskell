@@ -6,9 +6,11 @@ import Remote.Encoding
 import Remote.Init
 import Remote.Call
 import Remote.Peer
+import Remote.Closure
 
 import KMeansCommon
 
+import Data.Time
 import System.Random (randomR,getStdRandom)
 import Data.Typeable (Typeable)
 import Data.Data (Data)
@@ -37,8 +39,8 @@ reducetask
 split :: Int -> [a] -> [[a]] 
 split numChunks l = splitSize (ceiling $ fromIntegral (length l) / fromIntegral numChunks) l
    where
-      splitSize _ [] = []
-      splitSize i v = take i v : splitSize i (drop i v)
+      splitSize i v = let (first,second) = splitAt i v 
+                       in first : splitSize i second
 
 broadcast :: (Serializable a) => [ProcessId] -> a -> ProcessM ()
 broadcast pids dat = mapM_ (\pid -> send pid dat) pids
@@ -54,8 +56,8 @@ mapperProcess =
                          [
                             match (\vec -> return (Just vec,mreducers,mresult)),
                             match (\reducers -> return (mvecs,Just reducers,mresult)),
-                            roundtripResponse PldUser (\() -> return (mresult,(mvecs,mreducers,mresult))),
-                            roundtripResponse PldUser
+                            roundtripResponse (\() -> return (mresult,(mvecs,mreducers,mresult))),
+                            roundtripResponse
                                   (\clusters -> let tbl = analyze mvecs clusters
                                                     reducers = fromJust mreducers
                                                     target clust = reducers !! (clust `mod` length reducers)
@@ -79,7 +81,7 @@ reducerProcess :: ProcessM ()
 reducerProcess = let reduceProcess :: ([Cluster],[Cluster]) -> ProcessM ()
                      reduceProcess (oldclusters,clusters) = 
                           receiveWait [
-                                       roundtripResponse PldUser (\() -> return (clusters,(clusters,[]))),
+                                       roundtripResponse (\() -> return (clusters,(clusters,[]))),
                                        match (\x -> return (oldclusters,combineClusters clusters x)),
                                        matchUnknownThrow] >>= reduceProcess
                      combineClusters :: [Cluster] -> Cluster -> [Cluster]
@@ -97,12 +99,12 @@ readableShow ((_,one):rest) = (concat $ map (\(Vector x y) -> show x ++ " " ++ s
 
 initialProcess "MASTER" = 
   do peers <- getPeers
+     say $ "Got peers: " ++ show peers
      let mappers = findPeerByRole peers "MAPPER"
      let reducers = findPeerByRole peers "REDUCER"
      points <- liftIO $ getPoints "kmeans-points"
      clusters <- liftIO $ getClusters "kmeans-clusters"
      say $ "Got " ++ show (length points) ++ " points and "++show (length clusters)++" clusters"
-     say $ "Got peers: " ++ show peers
      mypid <- getSelfPid
      
      mapperPids <- multiSpawn mappers mapperProcess__closure
@@ -111,6 +113,9 @@ initialProcess "MASTER" =
      broadcast mapperPids reducerPids
      mapM_ (\(pid,chunk) -> send pid chunk) (zip (mapperPids) (split (length mapperPids) points))
 
+
+     say "Data transmitted, starting iteration"
+     starttime <- liftIO $ getCurrentTime
      let loop howmany clusters = do
            roundtripQueryMulti PldUser mapperPids clusters :: ProcessM [Either TransmitStatus ()]
            res <- roundtripQueryMulti PldUser reducerPids () :: ProcessM [Either TransmitStatus [Cluster]]
@@ -118,7 +123,8 @@ initialProcess "MASTER" =
            let newclusters2 = (sortBy (\a b -> compare (clId a) (clId b)) (concat newclusters))
            if newclusters2 == clusters || howmany >= 5
               then do
-                     say $ "Converged in " ++ show howmany ++ " iterations"
+                     donetime <- liftIO $ getCurrentTime
+                     say $ "Converged in " ++ show howmany ++ " iterations and " ++ (show $ diffUTCTime donetime starttime)
                      respoints <- roundtripQueryMulti PldUser mapperPids () :: ProcessM [Either TransmitStatus (Map.Map Int [Vector])]
                      
                      liftIO $ writeFile "kmeans-converged" $ readableShow $ Map.toList $ Map.unionsWith (++) (rights respoints)

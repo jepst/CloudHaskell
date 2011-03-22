@@ -4,23 +4,26 @@ nmappers=2
 nreducers=2
 
 pids=""
+host=`hostname`
+
+args="-cfgKnownHosts=$host +RTS -K20000000"
 
 # ghc --make KMeans || exit 1
 
 for i in $( seq 1 ${nmappers} )
 do
-  ./KMeans -cfgRole=MAPPER  +RTS -K20000000&
+  ./KMeans -cfgRole=MAPPER  $args &
   pid=$!
   pids="$pids $pid"
 done
 
 for i in $( seq 1 ${nreducers} )
 do
-  ./KMeans -cfgRole=REDUCER  +RTS -K20000000&
+  ./KMeans -cfgRole=REDUCER  $args &
   pid=$!
   pids="$pids $pid"
 done
 
-./KMeans -cfgRole=MASTER  +RTS -K20000000
+./KMeans -cfgRole=MASTER $args
 
 kill $pids

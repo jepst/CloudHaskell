@@ -24,20 +24,6 @@ data Pong = Pong ProcessId deriving (Data,Typeable)
 instance Binary Ping where put = genericPut; get=genericGet
 instance Binary Pong where put = genericPut; get=genericGet
 
-ping :: ProcessM ()
-ping = 
-   do { self <- getSelfPid 
-      ; receiveWait [
-          match (\ (Pong partner) -> 
-           let response = Ping self
-            in send partner response)
-       ]
-      ; ping }
-
-foo :: ProcessM Int
-foo = receiveWait [match return]
-
-
            
 sayHi :: ProcessId -> ProcessM ()
 sayHi s = do liftIO $ threadDelay 500000
