@@ -437,7 +437,7 @@ matchCore cond body =
            decodifiedh = maybe (Nothing) (serialDecodePure) (msgHeader (mbMessage mb))
         in
            case decodified of
-             Just x -> if cond (x,decodifiedh) 
+             Just x -> x `seq` if cond (x,decodifiedh) 
                           then returnHalt () (body (x,decodifiedh))
                           else liftSTM retry
              Nothing -> liftSTM retry

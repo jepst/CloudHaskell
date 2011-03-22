@@ -30,8 +30,8 @@ instance (Binary a,Typeable a) => Serializable a
 
 data Payload = Payload
                 { 
-                  payloadType :: ByteString,
-                  payloadContent :: ByteString
+                  payloadType :: !ByteString,
+                  payloadContent :: !ByteString
                 } deriving (Typeable)
 type PayloadLength = Int64
 
@@ -77,7 +77,7 @@ serialDecodePure a = (\id ->
                       if (decode $ payloadType a) == 
                             show (typeOf $ id undefined)
                          then 
-                                 Just (id $ decode (payloadContent a))
+                                 Just (id $! decode (payloadContent a))
                          else Nothing ) id
 
 
