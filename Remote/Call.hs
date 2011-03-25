@@ -3,6 +3,7 @@
 module Remote.Call (
 -- * Compile-time metadata
          remotable,
+         mkClosure,
          RemoteCallMetaData,
 -- * Runtime metadata
          registerCalls,
@@ -13,8 +14,7 @@ module Remote.Call (
          empty,
 -- * Re-exports
          Payload,
-         Closure(..),
-         liftIO,serialEncode,serialEncodePure,serialDecode
+         Closure(..)
         ) where
 
 import Language.Haskell.TH
@@ -40,6 +40,17 @@ import Remote.Closure (Closure(..))
 -- The name '__remoteCallMetaData' will be present
 -- in any module that uses 'remotable'.
 type RemoteCallMetaData = Lookup -> Lookup
+
+mkClosure :: Name -> Q Exp
+mkClosure n = do info <- reify n
+                 case info of
+                    VarI iname _ _ _ -> 
+                        do let newn = mkName $ show iname ++ "__closure"
+                           newinfo <- reify newn
+                           case newinfo of
+                              VarI newiname _ _ _ -> varE newiname
+                              _ -> error $ "Unexpected type of closure symbol for "++show n
+                    _ -> error $ "No closure corresponding to "++show n
 
 remotable :: [Name] -> Q [Dec]
 remotable names =
@@ -90,7 +101,7 @@ remotable names =
                                                       | show process == "GHC.Types.IO" -> 1
                               _ -> 2
                  payload = ConT ( mkName "Remote.Encoding.Payload")
-                 just a = conP (mkName "Just") [a]
+                 just a = conP (mkName "Prelude.Just") [a]
                  errorcall = [e| Prelude.error |]
                  liftio = [e| Control.Monad.Trans.liftIO |]
                  returnf = [e| Prelude.return |]
@@ -107,7 +118,7 @@ remotable names =
                  decodecall = [e| Remote.Encoding.serialDecode |]
                  encodecallio = [e| Remote.Encoding.serialEncode |]
                  encodecall = [e| Remote.Encoding.serialEncodePure |]
-                 closurecall = conE (mkName "Remote.Call.Closure")
+                 closurecall = [e| "Remote.Call.Closure" |]
                  closuredec = sigD closureName (return $ putParams closurearglist)
                  closuredef = funD closureName [clause paramnamesP
                                         (normalB (appE (appE closurecall (litE (stringL implFqn))) (appE encodecall (tupE paramnamesE))))

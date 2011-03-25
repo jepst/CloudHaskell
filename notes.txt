@@ -13,6 +13,8 @@ x. TaskM mock-up with k-means
 4. understand Erlang's global
 6. Easier Amazon launching, easier local network launching
 
+idea: fractional, composable monads (similar to fractional permissions in . E.g. IO is composed on several submonads: MVarM, ConsoleM, NetworkM, etc. We want to be able to write functions with stronger statements about their side-effects, as expreessed by type. So, we might have a function (increment :: MVar Int -> MVarM ()) that can be called from IO monad but also from MVarM monad, but not from ConsoleM monad. Likewise, we want
+
 
 imagine the case that a node crashes and restarts on the same port; how then shall we distinguish the processes of the new node fromthe old one? I therefore propose that NodeIds and ProcessIds be extended with an additional value, storing perhaps random value or the time that the node was started; The Rmt!! messages should contain complete Pid, not just LocalPid; receive will then check that the message was sent to the right node. This is especially important if I use the extended NodeId format that contains unique time of creation
 
@@ -30,6 +32,8 @@ To perform a global update: get a list of known nodes, set a lock, get another l
 
 Near future
 -------------
+Bug: a successful ping should reset the number of failures so far 0
+
 clean up cheaty mkName in Remote.Call where possible
 
 the foldl'-based code for receiving messages can be made more efficient by writing a custom foldl replacement

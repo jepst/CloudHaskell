@@ -1,0 +1,29 @@
+#!/usr/bin/env python
+
+import optparse
+
+import boto
+import boto.ec2
+
+def main():
+    parser = optparse.OptionParser()
+    parser.add_option("-r", "--region", help="Region (default eu-west-1)", dest="region", default="eu-west-1")
+    (options, args) = parser.parse_args()
+
+    for r in boto.ec2.regions():
+        if r.name == options.region:
+            region = r
+            break
+        else:
+            err("Region %s not found." % options.region)
+
+    ec2 = boto.connect_ec2(region=region)
+
+    reservation = ec2.get_all_instances()
+    for i in reservation:
+        for n in i.instances:
+            print "Found ",n.public_dns_name+"."
+
+if __name__ == "__main__":
+    main()
+
