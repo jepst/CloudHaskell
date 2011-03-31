@@ -18,13 +18,10 @@ idea: fractional, composable monads (similar to fractional permissions in . E.g.
 
 imagine the case that a node crashes and restarts on the same port; how then shall we distinguish the processes of the new node fromthe old one? I therefore propose that NodeIds and ProcessIds be extended with an additional value, storing perhaps random value or the time that the node was started; The Rmt!! messages should contain complete Pid, not just LocalPid; receive will then check that the message was sent to the right node. This is especially important if I use the extended NodeId format that contains unique time of creation
 
+buffered logging: incoming log messages are put into a buffer in sorted order. Another process concurrently removes them and prints them, making sure that the order that they are printed in is the same as the order of their timetamps. If there is a misordering in timestamps, a big LOG DISORDERING message gets output.
 
-autogenerate graph of data dependencies - displayable with GnuPlot or whatever
-
-to investigate: CML's first-class events; dynamics in Clean; "death by accidental complexity"; state charts; linear types; talk to Calvert about cost model of distributed computing; "session types" by Honda, AKA "communication types" by Nielson
+to investigate: X10, StreamIt, Fortress, CML's first-class events; dynamics in Clean; "death by accidental complexity"; state charts; linear types; talk to Calvert about cost model of distributed computing; "session types" by Honda, AKA "communication types" by Nielson
 investigate LinearML, Idris, 
-
-setting up to use amazon EC2 or other cloud-systems, 
 
 GlobalService maintains a list of active locks with their owners. Locks are acquired in a roundtrip conversation. Attempts to reacquire the same lock succeed. Attempt of another process to acquire the same lock fails.
 A global lock is set by sending a lock broadcast to all known peers. If any of the peers fails, try again after a random backoff.
@@ -32,7 +29,7 @@ To perform a global update: get a list of known nodes, set a lock, get another l
 
 Near future
 -------------
-Bug: a successful ping should reset the number of failures so far 0
+Bug: a successful ping should reset the number of failures so far 0. This wouldn't be a problem if the pings are turned into heartbeats that are send by the monitored node.
 
 clean up cheaty mkName in Remote.Call where possible
 

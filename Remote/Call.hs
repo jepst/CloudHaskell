@@ -118,7 +118,7 @@ remotable names =
                  decodecall = [e| Remote.Encoding.serialDecode |]
                  encodecallio = [e| Remote.Encoding.serialEncode |]
                  encodecall = [e| Remote.Encoding.serialEncodePure |]
-                 closurecall = [e| "Remote.Call.Closure" |]
+                 closurecall = [e| Remote.Closure.Closure |]
                  closuredec = sigD closureName (return $ putParams closurearglist)
                  closuredef = funD closureName [clause paramnamesP
                                         (normalB (appE (appE closurecall (litE (stringL implFqn))) (appE encodecall (tupE paramnamesE))))

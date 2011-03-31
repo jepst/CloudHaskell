@@ -12,7 +12,7 @@ import Data.Generics (Data)
 import Data.Maybe (fromJust)
 import Data.Typeable (Typeable)
 import Control.Monad (when,forever)
---import Control.Monad.Trans (liftIO)
+import Control.Monad.Trans (liftIO)
 import Data.Char (isUpper)
 import Control.Concurrent (threadDelay)
 import Data.Binary
@@ -23,7 +23,7 @@ sayHi = receiveWait [match (\(thepid,s) ->
                                 send thepid (reverse s :: String)
                                 liftIO $ threadDelay 5000000
                                 liftIO $ putChar $ head "" ),
-                                roundtripResponse PldUser (\q -> liftIO (threadDelay 9000000 ) >> return (q::String,()))]
+                                roundtripResponse (\q -> liftIO (threadDelay 9000000 ) >> return (q::String,()))]
 
 $( remotable [ 'sayHi ] )
 
@@ -37,7 +37,7 @@ initialProcess "MASTER" = do
 
 --              roundtripQuery PldUser nullPid "blorg" :: ProcessM (Either TransmitStatus String)
 
-              pid <- spawnRemote nid sayHi__closure
+              pid <- spawn nid sayHi__closure
 
 {-              res <- roundtripQueryUnsafe PldUser pid "yo"
               case res of

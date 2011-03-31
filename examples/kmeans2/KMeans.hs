@@ -11,6 +11,7 @@ import KMeansCommon
 
 import Control.Exception (try,SomeException,evaluate)
 import Control.Monad (liftM)
+import Control.Monad.Trans (liftIO)
 import System.Random (randomR,getStdRandom)
 import Data.Typeable (Typeable)
 import Data.Data (Data)
@@ -52,7 +53,8 @@ mapperProcess =
                             match (\reducers -> return (mvecs,Just reducers,mresult)),
                             roundtripResponse (\() -> return (mresult,(mvecs,mreducers,mresult))),
                             roundtripResponse
-                                  (\clusters -> let tbl = analyze (fromJust mvecs) clusters Map.empty
+                                  (\clusters -> let tbl = analyze (fromJust mvecs) clustersandcenters Map.empty
+                                                    clustersandcenters = map (\x -> (x,clusterCenter x)) clusters
                                                     reducers = fromJust mreducers
                                                     target clust = reducers !! (clust `mod` length reducers)
                                                     sendout (clustid,(count,sum)) =  send (target clustid) Cluster {clId = clustid,clCount=count, clSum=sum}
@@ -69,16 +71,16 @@ mapperProcess =
             condtrace cond s val = if cond
                                       then trace s val
                                       else val
-            analyze :: [Vector] -> [Cluster] -> Map.Map Int (Int,Vector) -> Map.Map Int (Int,Vector) 
+            analyze :: [Vector] -> [(Cluster,Vector)] -> Map.Map Int (Int,Vector) -> Map.Map Int (Int,Vector) 
             analyze [] _ ht = ht
             analyze (v:vectors) clusters ht =
                    let theclust = assignToCluster clusters v
                        newh = ht `seq` theclust `seq` Map.insertWith' (\(a,v1) (b,v2) -> let av = addVector v1 v2 in av `seq` (a+b,av) ) theclust (1,v) ht
 -- condtrace (blarg `mod` 1000 == 0) (show blarg) $ 
                     in newh `seq` analyze vectors clusters newh 
-            assignToCluster :: [Cluster] -> Vector -> Int
+            assignToCluster :: [(Cluster,Vector)] -> Vector -> Int
             assignToCluster clusters vector = 
-                   let distances = map (\x -> (clId x,sqDistance (clusterCenter x) vector)) clusters
+                   let distances = map (\(x,center) -> (clId x,sqDistance center vector)) clusters
                     in fst $ minimumBy (\(_,a) (_,b) -> compare a b) distances
             doit = mapProcess (Nothing,Nothing,Map.empty)
          in doit >> return ()
