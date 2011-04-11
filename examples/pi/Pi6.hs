@@ -5,6 +5,7 @@ import Remote.Call
 import Remote.Peer
 import Remote.Process
 import Remote.Init
+import Remote.Encoding
 
 import Data.Ratio
 import Debug.Trace
@@ -90,7 +91,7 @@ initialProcess "SLAVE" = do
            receiveWait []
 
 initialProcess "MASTER" = do
-           peers <- getPeersDynamic 50000
+           peers <- getPeers
            let slaves = findPeerByRole peers "SLAVE"
            let interval = 1000000
            mypid <- getSelfPid
