@@ -16,34 +16,34 @@ The state associated with process management is wrapped up in the Haskell monad 
 
 -- * Process management
 
-Processes are created with the 'spawnRemote' and 'forkProcess' functions. Their type signatures help explain their operation:
+Processes are created with the 'spawn' and 'spawnLocal' functions. Their type signatures help explain their operation:
 
-> forkProcess :: ProcessM () -> ProcessM ProcessId
-> spawnRemote :: NodeId -> Closure (ProcessM ()) -> ProcessM ProcessId
+> spawnLocal :: ProcessM () -> ProcessM ProcessId
+> spawn :: NodeId -> Closure (ProcessM ()) -> ProcessM ProcessId
 
-'forkProcess' takes a function in the ProcessM monad, starts it concurrently as a process on the same node as the caller, and gives a ProcessId that can be used to send messages to it. 'spawnRemote' works analogously, but also takes a NodeId, indicating where to run the process. This lets the programmer start arbitrary functions on other nodes, which may be running on other hosts. Actual code is not transmitted to the other node; instead, a function identifier is sent. This works on the assumption that all connected nodes are running identical copies of the compiled Haskell binary (unlike Erlang, which allows new code to be sent to remote nodes at runtime).
+'spawnLocal' takes a function in the ProcessM monad, starts it concurrently as a process on the same node as the caller, and gives a ProcessId that can be used to send messages to it. 'spawn' works analogously, but also takes a NodeId, indicating where to run the process. This lets the programmer start arbitrary functions on other nodes, which may be running on other hosts. Actual code is not transmitted to the other node; instead, a function identifier is sent. This works on the assumption that all connected nodes are running identical copies of the compiled Haskell binary (unlike Erlang, which allows new code to be sent to remote nodes at runtime).
 
-We encode the function identifier used to start remote processes as a Closure. Closures may identify only top-level functions, without free variables. Since 'spawnRemote' is the only way to run a process on a remote node, functions run remotely cannot capture local mutable variables. This is the other key distinction between 'spawnRemote' and 'forkProcess': processes run locally with forkProcess share memory with each other, but processes started with 'spawnRemote' cannot (even if the target node is in fact the local node).
+We encode the function identifier used to start remote processes as a Closure. Closures may identify only top-level functions, without free variables. Since 'spawn' is the only way to run a process on a remote node, functions run remotely cannot capture local mutable variables. This is the other key distinction between 'spawn' and 'spawnLocal': processes run locally with spawnLocal share memory with each other, but processes started with 'spawn' cannot (even if the target node is in fact the local node).
 
-The following code shows how local variable captures works with 'forkProcess'. There is no analogous code for 'spawnRemote'.
+The following code shows how local variable captures works with 'spawnLocal'. There is no analogous code for 'spawn'.
 
 > do m <- liftIO $ newEmptyMVar
->    forkProcess (liftIO $ putMVar m ())
+>    spawnLocal (liftIO $ putMVar m ())
 >    liftIO $ takeMVar m
 
 Whether a process is running locally or remotely, and whether or not it can share memory, sending messages to it works the same: the 'send' function, which corresponds to Erlang's ! operator.
 
 > send :: (Binary a) => ProcessId -> a -> ProcessM ()
 
-Given a ProcessId (from 'forkProcess' or 'spawnRemote') and a chunk of serializable data (implementing Haskell's 'Data.Binary.Binary' type class), we can send a message to the given process. The message will transmitted across the network if necessary and placed in the process's message queue. Note that 'send' will accept any type of data, as long as it implements Binary. Initially, all basic Haskell types implement binary, including tuples and arrays, and it's easy to implement Binary for user-defined types. How then does the receiving process know the type of message to extract from its queue? A message can receive processes by distinguishing their type using the 'receiveWait' function, which corresponds to Erlang's receive clause. The process can provide a distinct handler for each type of process that it knows how to deal with; unmatched messages remain on the queue, where they may be retrieved by later invocations of 'receiveWait'.
+Given a ProcessId (from 'spawnLocal' or 'spawn') and a chunk of serializable data (implementing Haskell's 'Data.Binary.Binary' type class), we can send a message to the given process. The message will transmitted across the network if necessary and placed in the process's message queue. Note that 'send' will accept any type of data, as long as it implements Binary. Initially, all basic Haskell types implement binary, including tuples and arrays, and it's easy to implement Binary for user-defined types. How then does the receiving process know the type of message to extract from its queue? A message can receive processes by distinguishing their type using the 'receiveWait' function, which corresponds to Erlang's receive clause. The process can provide a distinct handler for each type of process that it knows how to deal with; unmatched messages remain on the queue, where they may be retrieved by later invocations of 'receiveWait'.
 
 -- * Channels
 
 A /channel/ provides an alternative to message transmission with 'send' and 'receiveWait'. While 'send' and 'receiveWait' allow sending messages of any type, channels require messages to be of uniform type. Channels must be explicitly created with a call to 'makeChannel':
 
-> makeChannel :: (Binary a) => ProcessM (SendChannel a, ReceiveChannel a)
+> newChannel :: (Serializable a) => ProcessM (SendPort a, ReceivePort a)
 
-The resulting 'SendChannel' can be used with the 'sendChannel' function to insert messages into the channel, and the 'ReceiveChannel' can be used with 'receiveChannel'. The SendChannel can be serialized and sent as part of messages to other processes, which can then write to it; the ReceiveChannel, though, cannot be serialized, although it can be read from multiple threads on the same node by variable capture.
+The resulting 'SendPort' can be used with the 'sendChannel' function to insert messages into the channel, and the 'ReceivePort' can be used with 'receiveChannel'. The SendChannel can be serialized and sent as part of messages to other processes, which can then write to it; the ReceiveChannel, though, cannot be serialized, although it can be read from multiple threads on the same node by variable capture.
 
 -- * Setup and walkthrough
 
