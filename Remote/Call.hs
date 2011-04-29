@@ -100,7 +100,7 @@ remotable names =
                               (AppT (ConT process) _) | show process == "Remote.Process.ProcessM" -> 0
                                                       | show process == "GHC.Types.IO" -> 1
                               _ -> 2
-                 payload = ConT ( mkName "Remote.Encoding.Payload")
+                 payload = ConT ( mkName "Remote.Call.Payload")
                  just a = conP (mkName "Prelude.Just") [a]
                  errorcall = [e| Prelude.error |]
                  liftio = [e| Control.Monad.Trans.liftIO |]
@@ -133,8 +133,16 @@ remotable names =
                                                       ]))
                                          []]
 
-                 implPldec = sigD implPlName (return $ putParams implarglist)
-                 implPldef = funD implPlName [clause [varP (mkName "a")]
+                 implPldec = case last arglist of
+                              (AppT (ConT process) v) | show process == "Remote.Task.TaskM" ->
+                                   sigD implPlName (return $ putParams $ [payload,(AppT (ConT process) payload)])
+                              _ -> sigD implPlName (return $ putParams implarglist)
+                 implPldef = case last arglist of
+                              (AppT (ConT process) _) | show process == "Remote.Task.TaskM" ->
+                                   funD implPlName [clause [varP (mkName "a")]
+                                                  (normalB (appE (varE (mkName "Remote.Task.remoteCallRectify")) (appE (varE implName) (varE (mkName "a") )))) []
+                                        ]
+                              _ -> funD implPlName [clause [varP (mkName "a")]
                                          (normalB (doE [bindS (varP (mkName "res")) ( (appE (varE implName) (varE (mkName "a")))),
                                                        noBindS (appE liftio (appE encodecallio (varE (mkName "res")))) ] )) [] ] 
                  arglist = getParams atype

@@ -45,7 +45,8 @@ module Remote.Process  (
                        PortId,LocalProcessId,
                        localRegistryHello,localRegistryRegisterNode,localRegistryQueryNodes,localRegistryUnregisterNode,
                        sendSimple,makeNodeFromHost,localFromPid,getNewMessageLocal,getProcess,Message,msgPayload,Process,prNodeRef,
-                       roundtripResponse,roundtripQuery,roundtripQueryMulti,
+                       roundtripResponse,roundtripResponseAsync,roundtripQuery,roundtripQueryMulti,
+                       makePayloadClosure,getLookup,nodeFromPid,
                        PayloadDisposition(..),
 
                        -- * System service processes, not for general use
@@ -654,11 +655,15 @@ roundtripQueryMulti pld pids dat = -- TODO timeout
                              m <- receiving (Map.fromList res)
                              return $ catMaybes (Map.elems m)
 
+generalPid :: ProcessId -> ProcessId
+generalPid (ProcessId n p) = ProcessId n (-1)
+
 roundtripQuery :: (Serializable a, Serializable b) => PayloadDisposition -> ProcessId -> a -> ProcessM (Either TransmitStatus b)
 roundtripQuery pld pid dat =
-  case pld of
-      PldAdmin -> roundtripQueryImpl 0 pld pid dat -- TODO this is a hack. we should be able to monitor admin pids
-      _ -> withMonitor pid $ roundtripQueryImpl 0 pld pid dat
+    withMonitor apid $ roundtripQueryImpl 0 pld pid dat
+  where apid = case pld of
+                   PldAdmin -> generalPid pid
+                   _ -> pid
 
 roundtripQueryUnsafe :: (Serializable a, Serializable b) => PayloadDisposition -> ProcessId -> a -> ProcessM (Either TransmitStatus b)
 roundtripQueryUnsafe pld pid dat = 
@@ -674,7 +679,8 @@ roundtripQueryImpl time pld pid dat =
             QteOK -> receiver [matchCore (\(_,h) -> case h of
                                                             Just a -> msgheaderConversationId a == convId && msgheaderSender a == pid
                                                             Nothing -> False) (return . Right . fst),
-                                  matchProcessDown pid ((return . Left . QteNetworkError) "Remote partner unavailable")]
+                                  matchProcessDown pid ((return . Left . QteNetworkError) "Remote partner unavailable"),
+                                  matchProcessDown (generalPid pid) ((return . Left . QteNetworkError) "Remote partner unavailable")]
             err -> return (Left err)
    where 
          mysend p d mh pld = case time of
@@ -1728,7 +1734,7 @@ withMonitor pid f = withMonitoring pid MaMonitor f
 withMonitoring :: ProcessId -> MonitorAction -> ProcessM a -> ProcessM a
 withMonitoring pid how f =  
                         do mypid <- getSelfPid
-                           monitorProcess mypid pid how
+                           monitorProcess mypid pid how -- TODO if this throws a ServiceException, translate that into a trigger
                            a <- f `pfinally` unmonitorProcess mypid pid how
                            return a
 
@@ -1813,7 +1819,7 @@ startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyG
                           node <- liftIO $ readMVar (prNodeRef p)
                           res <- liftIO $ atomically $ getProcessTableEntry node lpid
                           case res of
-                            Nothing -> return False
+                            Nothing -> return (lpid<0)
                             Just _ -> return True
     removeLocalMonitee gl monitor monitee action = 
          gl {glLinks = gdDelMonitee (glLinks gl) monitor (localFromPid monitee) }
