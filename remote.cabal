@@ -7,7 +7,7 @@ License-file:        LICENSE
 Extra-Source-Files:  README
 Author:              Jeff Epstein <jee36@cam.ac.uk>
 Maintainer:          Jeff Epstein <jee36@cam.ac.uk>
-Build-Depends:       base >= 4, time, filepath, containers, network, syb, binary, mtl, bytestring, template-haskell, stm
+Build-Depends:       base >= 4, time, filepath, containers, network, syb, binary, mtl, bytestring, template-haskell, stm, pureMD5, utf8-string, directory
 Build-Type:          Simple
 Cabal-Version:       >=1.2
 tested-with:         GHC ==6.12.1
