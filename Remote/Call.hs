@@ -94,6 +94,11 @@ remotable names =
                                         _ -> toProcessM payload
                                   _ -> toProcessM payload
                  processmtoclosure (x) =  (AppT (ConT (mkName "Remote.Call.Closure")) x)
+                 isarrowful = isarrow $ last arglist
+                 isarrow (AppT (AppT ArrowT _) _) = True
+                 isarrow (AppT (ConT process) v) 
+                     | isarrow v && (show process == "Remote.Task.TaskM" || show process == "Remote.Process.ProcessM") = True
+                 isarrow _ = False
                  applyargs f [] = f
                  applyargs f (l:r) = applyargs (appE f l) r
                  funtype = case last arglist of
@@ -132,7 +137,7 @@ remotable names =
                                                               match wildP (normalB (appE (errorcall) (litE (stringL ("Bad decoding in closure splice of "++nameBase aname))))) []])
                                                       ]))
                                          []]
-
+                 implPls = if isarrowful then [implPldec,implPldef] else []
                  implPldec = case last arglist of
                               (AppT (ConT process) v) | show process == "Remote.Task.TaskM" ->
                                    sigD implPlName (return $ putParams $ [payload,(AppT (ConT process) payload)])
@@ -148,7 +153,8 @@ remotable names =
                  arglist = getParams atype
               in
                  case funtype of
-                      _ -> ([closuredec,closuredef,impldec,impldef,implPldec,implPldef],[aname,implName,implPlName])
+                      _ -> ([closuredec,closuredef,impldec,impldef]++if not isarrowful then [implPldec,implPldef] else [],
+                            [aname,implName]++if not isarrowful then [implPlName] else [])
           getType name = 
              do info <- reify name
                 case info of 

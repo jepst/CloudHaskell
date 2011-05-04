@@ -47,7 +47,7 @@ module Remote.Process  (
                        sendSimple,makeNodeFromHost,localFromPid,getNewMessageLocal,getProcess,Message,msgPayload,Process,prNodeRef,
                        roundtripResponse,roundtripResponseAsync,roundtripQuery,roundtripQueryMulti,
                        makePayloadClosure,getLookup,nodeFromPid,
-                       PayloadDisposition(..),
+                       PayloadDisposition(..),suppressTransmitException,
 
                        -- * System service processes, not for general use
                        startSpawnerService,startLoggingService,startProcessMonitorService,startLocalRegistry,startFinalizerService,startNodeMonitorService,
@@ -85,8 +85,6 @@ import Control.Concurrent.STM (STM,atomically,retry,orElse)
 import Control.Concurrent.STM.TChan (TChan,isEmptyTChan,readTChan,newTChanIO,writeTChan)
 import Control.Concurrent.STM.TVar (TVar,newTVarIO,readTVar,writeTVar)
 
-
-
 import Debug.Trace
 
 ----------------------------------------------
@@ -108,8 +106,9 @@ data Config = Config
              cfgPeerDiscoveryPort :: !PortId, -- ^ The UDP port on which local peer discovery broadcasts are sent. Defaults to 38813, and only matters if you rely on dynamic peer discovery
              cfgNetworkMagic :: !String, -- ^ The unique identifying string for this network or application. Must not contain spaces. The uniqueness of this string ensures that multiple applications running on the same physical network won't accidentally communicate with each other. All nodes of your application should have the same network magic. Defaults to MAGIC
              cfgKnownHosts :: ![String], -- ^ A list of hosts where nodes may be running. When 'Remote.Peer.getPeers' or 'Remote.Peer.getPeerStatic' is called, each host on this list will be queried for its nodes. Only matters if you rely on static peer discovery.
-             cfgRoundtripTimeout :: Int, -- ^ The amount of time to wait for a response from a system service on a remote node. If your network has high latency or congestion, you may need to increase this to avoid incorrect reports of node inaccessibility.
-             cfgArgs :: [String] -- ^ Command-line arguments that are not part of the node configuration are placed here and can be examined by your application
+             cfgRoundtripTimeout :: Int, -- ^ Microseconds to wait for a response from a system service on a remote node. If your network has high latency or congestion, you may need to increase this to avoid incorrect reports of node inaccessibility.
+             cfgArgs :: [String], -- ^ Command-line arguments that are not part of the node configuration are placed here and can be examined by your application
+             cfgPromiseFlushDelay :: Int -- ^ Time in microseconds before an in-memory promise is flushed to disk
 --             logConfig :: LogConfig
          } deriving (Show)
 
@@ -660,7 +659,10 @@ generalPid (ProcessId n p) = ProcessId n (-1)
 
 roundtripQuery :: (Serializable a, Serializable b) => PayloadDisposition -> ProcessId -> a -> ProcessM (Either TransmitStatus b)
 roundtripQuery pld pid dat =
-    withMonitor apid $ roundtripQueryImpl 0 pld pid dat
+    do res <- ptry $ withMonitor apid $ roundtripQueryImpl 0 pld pid dat id []
+       case res of
+         Left (ServiceException s) -> return $ Left $ QteOther s
+         Right a -> return a
   where apid = case pld of
                    PldAdmin -> generalPid pid
                    _ -> pid
@@ -668,19 +670,20 @@ roundtripQuery pld pid dat =
 roundtripQueryUnsafe :: (Serializable a, Serializable b) => PayloadDisposition -> ProcessId -> a -> ProcessM (Either TransmitStatus b)
 roundtripQueryUnsafe pld pid dat = 
                        do cfg <- getConfig
-                          roundtripQueryImpl (cfgRoundtripTimeout cfg) pld pid dat
+                          roundtripQueryImpl (cfgRoundtripTimeout cfg) pld pid dat id []
 
-roundtripQueryImpl :: (Serializable a, Serializable b) => Int -> PayloadDisposition -> ProcessId -> a -> ProcessM (Either TransmitStatus b)
-roundtripQueryImpl time pld pid dat =
+roundtripQueryImpl :: (Serializable a, Serializable b) => Int -> PayloadDisposition -> ProcessId -> a -> (b -> c) -> [MatchM (Either TransmitStatus c) ()] -> ProcessM (Either TransmitStatus c)
+roundtripQueryImpl time pld pid dat converter additional =
     do convId <- liftIO $ newConversationId
        sender <- getSelfPid
        res <- mysend pid dat (Just RoundtripHeader {msgheaderConversationId = convId,msgheaderSender = sender,msgheaderDestination = pid}) pld
        case res of
-            QteOK -> receiver [matchCore (\(_,h) -> case h of
+            QteOK -> receiver $ [matchCore (\(_,h) -> case h of
                                                             Just a -> msgheaderConversationId a == convId && msgheaderSender a == pid
-                                                            Nothing -> False) (return . Right . fst),
+                                                            Nothing -> False) (return . Right . converter . fst),
                                   matchProcessDown pid ((return . Left . QteNetworkError) "Remote partner unavailable"),
                                   matchProcessDown (generalPid pid) ((return . Left . QteNetworkError) "Remote partner unavailable")]
+                                   ++ additional
             err -> return (Left err)
    where 
          mysend p d mh pld = case time of
@@ -690,7 +693,7 @@ roundtripQueryImpl time pld pid dat =
                                         Nothing -> return QteConnectionTimeout
                                         Just other -> return other
          receiver matchers = case time of
-                        0 -> receiveWait matchers
+                        0 -> receiveWait matchers --TODO remove convId
                         n -> do res <- receiveTimeout n matchers
                                 case res of
                                    Nothing -> return (Left QteConnectionTimeout)
@@ -1068,6 +1071,13 @@ isPidLocal pid = do mine <- getSelfPid
 -- * Exception handling
 ----------------------------------------------
 
+suppressTransmitException :: ProcessM a -> ProcessM (Maybe a)
+suppressTransmitException a = 
+     do res <- ptry a
+        case res of
+          Left (TransmitException _) -> return Nothing
+          Right a -> return $ Just a
+
 ptry :: (Exception e) => ProcessM a -> ProcessM (Either e a)
 ptry f = do p <- getProcess
             res <- liftIO $ try (runProcessM f p)
@@ -1112,7 +1122,8 @@ emptyConfig = Config {
                   cfgLocalRegistryListenPort = 38813,
                   cfgNetworkMagic = "MAGIC",
                   cfgKnownHosts = [],
-                  cfgRoundtripTimeout = 2000000,
+                  cfgRoundtripTimeout = 5000000,
+                  cfgPromiseFlushDelay = 5000000,
                   cfgArgs = []
                   }
 
@@ -1170,6 +1181,7 @@ processConfig rawLines from = foldl processLine from rawLines
   updateCfg cfg "cfgListenPort" p = cfg {cfgListenPort=(read.isInt) p}
   updateCfg cfg "cfgPeerDiscoveryPort" p = cfg {cfgPeerDiscoveryPort=(read.isInt) p}
   updateCfg cfg "cfgRoundtripTimeout" p = cfg {cfgRoundtripTimeout=(read.isInt) p}
+  updateCfg cfg "cfgPromiseFlushDelay" p = cfg {cfgPromiseFlushDelay=(read.isInt) p}
   updateCfg cfg "cfgLocalRegistryListenPort" p = cfg {cfgLocalRegistryListenPort=(read.isInt) p}
   updateCfg cfg "cfgKnownHosts" m = cfg {cfgKnownHosts=words m}
   updateCfg cfg "cfgNetworkMagic" m = cfg {cfgNetworkMagic=clean m}
@@ -1547,7 +1559,8 @@ setDaemonic = do p <- getProcess
 serviceThread :: ServiceId -> ProcessM () -> ProcessM ()
 serviceThread v f = spawnLocalAnd (pbracket (return ())
                              (\_ -> adminDeregister v >> logError)
-                             (\_ -> f)) (adminRegister v >> setDaemonic) >> return ()
+                             (\_ -> f)) (adminRegister v >> setDaemonic)
+                        >> (return()) 
           where logError = logS "SYS" LoFatal $ "System process "++show v++" has terminated" -- TODO maybe restart?
 
 
@@ -1726,8 +1739,7 @@ matchProcessDown pid f = matchIf (\(ProcessMonitorException p _) -> p==pid) (con
 -- | Establishes temporary monitoring of another process. The process to be monitored is given in the
 -- first parameter, and the code to run in the second. If the given process goes down while the code
 -- in the second parameter is running, a process down message will be sent to the current process,
--- which can be handled by 'matchProcessDown'. Alternatively, use 'withMonitoring' for more general
--- temporary monitoring of other processes.
+-- which can be handled by 'matchProcessDown'. 
 withMonitor :: ProcessId -> ProcessM a -> ProcessM a
 withMonitor pid f = withMonitoring pid MaMonitor f 
 
@@ -1737,6 +1749,7 @@ withMonitoring pid how f =
                            monitorProcess mypid pid how -- TODO if this throws a ServiceException, translate that into a trigger
                            a <- f `pfinally` unmonitorProcess mypid pid how
                            return a
+
 
 -- | Establishes unidirectional processing of another process. The format is:
 --
@@ -1789,6 +1802,17 @@ sendInterrupt pid e = do islocal <- isPidLocal pid
                                                          return True
                                           Nothing -> return False
 
+triggerMonitor :: ProcessId -> ProcessId -> MonitorAction -> SignalReason -> ProcessM ()
+triggerMonitor towho aboutwho how why = 
+                 let 
+                      msg = ProcessMonitorException aboutwho why
+                  in case how of
+                       MaMonitor -> sendSimple towho msg PldUser  >> return ()
+                       MaLink -> sendInterrupt towho msg  >> return ()
+                       MaLinkError -> case why of
+                                        SrNormal -> return ()
+                                        _ -> sendInterrupt towho msg  >> return ()
+
 startProcessMonitorService :: ProcessM ()
 startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyGlobal)
   where 
@@ -1804,16 +1828,7 @@ startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyG
                                                   True -> return True
                                                   False -> do trigger monitor monitee action SrInvalid
                                                               return False
-    trigger :: ProcessId -> ProcessId -> MonitorAction -> SignalReason -> ProcessM ()
-    trigger towho aboutwho how why = 
-                 let 
-                      msg = ProcessMonitorException aboutwho why
-                  in case how of
-                       MaMonitor -> sendSimple towho msg PldUser  >> return ()
-                       MaLink -> sendInterrupt towho msg  >> return ()
-                       MaLinkError -> case why of
-                                        SrNormal -> return ()
-                                        _ -> sendInterrupt towho msg  >> return ()
+    trigger = triggerMonitor
     forward destinationnode msg = sendSimple (getGlobalFor destinationnode) msg PldAdmin
     isProcessUp lpid = do p <- getProcess
                           node <- liftIO $ readMVar (prNodeRef p)
@@ -1856,7 +1871,7 @@ startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyG
                                         pids = filter (\n -> nodeFromPid n == nid) aslist
                                      in do res <- foldM (\g p -> handleProcessDown g p SrNoPing) gl pids
                                            return $ global {glLinks = res}
-             matchSyncs cmd =
+             matchSyncs global cmd =
                 case cmd of
                   GlRequestMonitoring monitee monitor action ->
                        let s1 = addLocalMonitor global monitor monitee action
@@ -1871,6 +1886,18 @@ startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyG
                   GlRequestUnmonitoring monitee monitor action ->
                        let s1 = removeLocalMonitor global monitor monitee action
                         in return (QteOK,s1)
+             roundtripQuerySimul pld pid dat global = 
+                 let
+                     ms = roundtripResponse (\x -> do a <- matchSyncs global x
+                                                      case a of
+                                                        (ret,newg) -> return (ret,Right $ Left newg))
+                 in
+                 do cfg <- getConfig
+                    res <- roundtripQueryImpl (cfgRoundtripTimeout cfg) pld pid dat Right [ms]
+                    case res of
+                      Left a -> return (global,Left a)
+                      Right (Left g) -> roundtripQuerySimul pld pid dat g
+                      Right (Right v) -> return (global,Right v)
              matchCommands cmd = 
                 case cmd of
                   GlMonitor monitor monitee action -> 
@@ -1886,23 +1913,23 @@ startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyG
                          (True,False) -> do live <- checklivenessandtrigger monitor monitee action
                                             case live of
                                               True -> let msg = GlRequestMonitoring monitee monitor action
-                                                       in do sync <- roundtripQueryUnsafe PldAdmin (getGlobalFor monitor) msg
+                                                       in do (newglobal,sync) <- roundtripQuerySimul PldAdmin (getGlobalFor monitor) msg global
                                                              case sync of
-                                                               Left err -> return (err,global)
-                                                               Right QteOK -> let s1 = addLocalNode global monitor monitee action
+                                                               Left err -> return (err,newglobal)
+                                                               Right QteOK -> let s1 = addLocalNode newglobal monitor monitee action
                                                                                in return (QteOK,s1)
-                                                               Right err -> return (err,global)
+                                                               Right err -> return (err,newglobal)
                                               False -> return (QteOK,global)
                          (False,True) -> let msg = GlRequestMoniteeing monitee (nodeFromPid monitor)
-                                          in do sync <- roundtripQueryUnsafe PldAdmin (getGlobalFor monitee) msg
+                                          in do (newglobal,sync) <- roundtripQuerySimul PldAdmin (getGlobalFor monitee) msg global
                                                 case sync of
-                                                   Left err -> return (err,global)
-                                                   Right QteOK -> let s1 = addLocalMonitor global monitor monitee action 
+                                                   Left err -> return (err,newglobal)
+                                                   Right QteOK -> let s1 = addLocalMonitor newglobal monitor monitee action 
                                                                    in do monitorNode (nodeFromPid monitee)
                                                                          return (QteOK,s1)
                                                    Right QteUnknownPid -> do trigger monitor monitee action SrInvalid
-                                                                             return (QteOK,global)
-                                                   Right err -> return (err,global)
+                                                                             return (QteOK,newglobal)
+                                                   Right err -> return (err,newglobal)
                          (False,False) -> return (QteOther "Requesting monitoring by third party node",global)
                   GlUnmonitor monitor monitee action -> 
                     do ismoniteelocal <- isPidLocal monitee
@@ -1922,8 +1949,7 @@ startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyG
                          (False,False) -> return (QteOther "Requesting unmonitoring by third party node",global) 
           in receiveWait [match matchSignals,
                           roundtripResponse matchCommands,
-                          roundtripResponse matchSyncs,
-                          matchUnknownThrow] >>= service
+                          roundtripResponse (matchSyncs global)] >>= service
 
 data AmSpawn = AmSpawn (Closure (ProcessM ())) AmSpawnOptions deriving (Typeable)
 instance Binary AmSpawn where 

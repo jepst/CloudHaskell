@@ -4,7 +4,8 @@
 module Remote.Init (remoteInit) where
 
 import Remote.Peer (startDiscoveryService)
-import Remote.Process (pbracket,localRegistryRegisterNode,localRegistryHello,localRegistryUnregisterNode,
+import Remote.Task (__remoteCallMetaData)
+import Remote.Process (suppressTransmitException,pbracket,localRegistryRegisterNode,localRegistryHello,localRegistryUnregisterNode,
                        startProcessMonitorService,startNodeMonitorService,startLoggingService,startSpawnerService,ProcessM,readConfig,initNode,startLocalRegistry,
                        forkAndListenAndDeliver,waitForThreads,roleDispatch,Node,runLocalProcess,performFinalization,startFinalizerService)
 import Remote.Call (registerCalls,RemoteCallMetaData)
@@ -24,7 +25,7 @@ startServices =
               startLoggingService
               startDiscoveryService
               startSpawnerService
-              startFinalizerService (localRegistryUnregisterNode)
+              startFinalizerService (suppressTransmitException localRegistryUnregisterNode >> return ())
 
 dispatchServices :: MVar Node -> IO ()
 dispatchServices node = do mv <- newEmptyMVar
@@ -49,7 +50,8 @@ dispatchServices node = do mv <- newEmptyMVar
 remoteInit :: Maybe FilePath -> [RemoteCallMetaData] -> (String -> ProcessM ()) -> IO ()
 remoteInit defaultConfig metadata f = 
        let
-          lookup = registerCalls metadata
+          defaultMetaData = [Remote.Task.__remoteCallMetaData]
+          lookup = registerCalls (defaultMetaData ++ metadata)
        in
        do
           configFileName <- getConfigFileName

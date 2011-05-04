@@ -12,6 +12,7 @@ module Remote.Encoding (
           hGetPayload,
           payloadLength,
           getPayloadType,
+          getPayloadContent,
           genericPut,
           genericGet) where
 
@@ -41,6 +42,9 @@ instance Binary Payload where
 
 payloadLength :: Payload -> PayloadLength
 payloadLength (Payload t c) = B.length t + B.length c
+
+getPayloadContent :: Payload -> ByteString
+getPayloadContent = payloadContent
 
 getPayloadType :: Payload -> String
 getPayloadType pl = decode $ payloadType pl
