@@ -1,4 +1,9 @@
 {-# LANGUAGE  DeriveDataTypeable #-}
+
+-- | Exposes mechanisms for a program built on the "Remote.Process"
+-- framework to discover nodes on the current network. Programs
+-- can perform node discovery manually, or they can use "Remote.Task",
+-- which does it automatically.
 module Remote.Peer (PeerInfo,startDiscoveryService,getPeers,getPeersStatic,getPeersDynamic,findPeerByRole) where
 
 import Network.Socket (defaultHints,sendTo,recv,sClose,Socket,getAddrInfo,AddrInfoFlag(..),setSocketOption,addrFlags,addrSocketType,addrFamily,SocketType(..),Family(..),addrProtocol,SocketOption(..),AddrInfo,bindSocket,addrAddress,SockAddr(..),socket)

@@ -1,4 +1,10 @@
 {-# LANGUAGE DeriveDataTypeable #-}
+
+-- | A simple type to represent a closure, that is, a function
+-- and its environment. The current implementation represents
+-- functions as strings, but this could be theoretically
+-- swapped out for the \"static\" mechanism described in the
+-- paper.
 module Remote.Closure (
                        -- * Closure
                        Closure(..)

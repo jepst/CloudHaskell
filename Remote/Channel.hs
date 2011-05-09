@@ -1,4 +1,10 @@
 {-# LANGUAGE ExistentialQuantification,DeriveDataTypeable #-}
+
+-- | This module provides typed channels, an alternative
+-- approach to interprocess messaging. Typed channels
+-- can be used in combination with or instead of the
+-- the untyped channels available in the "Remote.Process"
+-- module via 'send'.
 module Remote.Channel (
                        -- * Basic typed channels
                        SendPort,ReceivePort,newChannel,sendChannel,receiveChannel,

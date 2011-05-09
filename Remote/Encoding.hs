@@ -1,5 +1,9 @@
 {-# LANGUAGE DeriveDataTypeable,CPP,FlexibleInstances,UndecidableInstances #-}
 
+-- | This module provides the 'Serializable' type class and
+-- functions to convert to and from 'Payload's. It's implemented
+-- in terms of Haskell's "Data.Binary". The message sending
+-- and receiving functionality in "Remote.Process" depends on this.
 module Remote.Encoding (
           Serializable,
           serialEncode,
@@ -77,12 +81,14 @@ serialEncode a = do encoded <- evaluate $ encode a -- this evaluate is actually 
 
 
 serialDecodePure :: (Serializable a) => Payload -> Maybe a
-serialDecodePure a = (\id ->
-                      if (decode $ payloadType a) == 
-                            show (typeOf $ id undefined)
-                         then 
-                                 Just (id $ decode (payloadContent a))
-                         else Nothing ) id
+serialDecodePure a = (\id -> 
+                      let pc = payloadContent a
+                      in
+                        pc `seq`
+                        if (decode $! payloadType a) == 
+                              show (typeOf $ id undefined)
+                          then Just (id $! decode pc)
+                          else Nothing ) id
 
 
 serialDecode :: (Serializable a) => Payload -> IO (Maybe a)

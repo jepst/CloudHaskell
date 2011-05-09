@@ -1,9 +1,30 @@
 {-# LANGUAGE DeriveDataTypeable #-}
-module Remote.Task where
+
+-- | This module provides data dependency resolution and
+-- fault tolerance via /promises/ (known elsewhere as /futures/).
+-- It's implemented in terms of the "Remote.Process" module.
+module Remote.Task (
+                   -- * Tasks and promises
+                   TaskM, Promise,
+                   startMaster,
+                   newPromise, asPromise,
+                   readPromise, 
+
+                   -- * MapReduce
+                   MapReduce(..),
+                   mapReduce,
+
+                   -- * Useful auxilliary functions
+                   chunkify,
+
+                   -- * Internals, not for general use
+                   __remoteCallMetaData,
+                   remoteCallRectify
+                   ) where
 
 import Remote.Call (putReg,getEntryByIdent)
-import Remote.Encoding (hGetPayload,hPutPayload,Payload(..),getPayloadContent,Serializable,serialDecode,serialEncode,genericGet,genericPut)
-import Remote.Process (getConfig,Config(..),matchProcessDown,terminate,nullPid,monitorProcess,TransmitException(..),MonitorAction(..),ptry,LogConfig(..),getLogConfig,setNodeLogConfig,setLogConfig,nodeFromPid,LogLevel(..),LogTarget(..),logS,getLookup,say,NodeId,ProcessM,ProcessId,PayloadDisposition(..),getSelfPid,getSelfNode,matchUnknownThrow,receiveWait,receiveTimeout,roundtripResponse,roundtripResponseAsync,roundtripQuery,match,invokeClosure,makePayloadClosure,spawn,spawnLocal,spawnLocalAnd,setDaemonic,send,makeClosure)
+import Remote.Encoding (serialEncodePure,hGetPayload,hPutPayload,Payload(..),getPayloadContent,Serializable,serialDecode,serialEncode,genericGet,genericPut)
+import Remote.Process (diffTime,getConfig,Config(..),matchProcessDown,terminate,nullPid,monitorProcess,TransmitException(..),MonitorAction(..),ptry,LogConfig(..),getLogConfig,setNodeLogConfig,setLogConfig,nodeFromPid,LogLevel(..),LogTarget(..),logS,getLookup,say,NodeId,ProcessM,ProcessId,PayloadDisposition(..),getSelfPid,getSelfNode,matchUnknownThrow,receiveWait,receiveTimeout,roundtripResponse,roundtripResponseAsync,roundtripQuery,match,invokeClosure,makePayloadClosure,spawn,spawnLocal,spawnLocalAnd,setDaemonic,send,makeClosure)
 import Remote.Closure (Closure(..))
 import Remote.Peer (getPeers)
 
@@ -18,11 +39,11 @@ import Control.Monad (liftM,when)
 import Control.Monad.Trans (liftIO)
 import Control.Concurrent.MVar (MVar,modifyMVar,modifyMVar_,newMVar,newEmptyMVar,takeMVar,putMVar,readMVar,withMVar)
 import qualified Data.Map as Map (Map,insert,lookup,empty,elems,insertWith')
-import Data.List ((\\),union,nub)
-import Data.Dynamic (Dynamic)
+import Data.List ((\\),union,nub,groupBy,sortBy)
 import System.FilePath (FilePath)
 import Data.Time (UTCTime,getCurrentTime)
 
+-- imports required for hashClosure; is there a lighter-weight of doing this?
 import Data.Digest.Pure.MD5 (md5)
 import Data.ByteString.Lazy.UTF8 (fromString)
 import qualified Data.ByteString.Lazy as B (concat)
@@ -31,15 +52,45 @@ import Debug.Trace
 
 -- How does Erlang automatic restarts? OTP library etc
 
--- todo: implement disk storage
+-- todo: check diskified file before starting closure
 
 -- kmeans
+
+-- who is daemonic? master? nodeboss? nodeworker
 
 -- mapreduce
 
 -- autoshutdown worker nodes if their nodeboss goes down (via MaLink)
 
-type ClosureWrapper = Dynamic
+
+----------------------------------------------
+-- * Promises and tasks
+----------------------------------------------
+
+
+type PromiseId = Int
+
+data PromiseList a = PlChunk a (Promise (PromiseList a))
+                   | PlNil deriving Typeable
+
+instance (Binary a) => Binary (PromiseList a) where
+   put (PlChunk a p) = putWord8 0 >> put a >> put p
+   put PlNil = putWord8 1
+   get = do w <- getWord8
+            case w of
+               0 -> do a <- get
+                       p <- get
+                       return $ PlChunk a p
+               1 -> return PlNil
+
+data Promise a = PromiseBasic { psRedeemer :: ProcessId, psId :: PromiseId } deriving Typeable
+-- psRedeemer should maybe be wrapped in an IORef so that it can be updated in case of node failure
+
+instance Binary (Promise a) where
+   put (PromiseBasic a b) = put a >> put b
+   get = do a <- get
+            b <- get
+            return $ PromiseBasic a b
 
 data PromiseStorage = PromiseInMemory PromiseData UTCTime
                     | PromiseOnDisk FilePath
@@ -50,6 +101,7 @@ type TimeStamp = UTCTime
 
 data MasterState = MasterState
      {
+         msNextId :: PromiseId,
          msNodes :: MVar [(NodeId,ProcessId)],
          msAllocation :: Map.Map ProcessId [PromiseId],
          msPromises :: Map.Map PromiseId (ProcessId,Closure PromiseData)
@@ -60,19 +112,31 @@ spawnDaemonic p = spawnLocalAnd p setDaemonic
 
 runWorkerNode :: ProcessId -> NodeId -> ProcessM ProcessId
 runWorkerNode masterpid nid = 
-     do clo <- makeClosure "runWorkerNode__impl" (masterpid) :: ProcessM (Closure (ProcessM ()))
+     do clo <- makeClosure "Remote.Task.runWorkerNode__impl" (masterpid) :: ProcessM (Closure (ProcessM ()))
         spawn nid clo
 
 runWorkerNode__impl :: Payload -> ProcessM ()
 runWorkerNode__impl pl = 
-   do setDaemonic
+   do setDaemonic -- not sure if it's good to have the node manager be daemonic
       mpid <- liftIO $ serialDecode pl
       case mpid of
          Just masterpid -> handler masterpid
          Nothing -> error "Failure to extract in rwn__impl"
  where handler masterpid = startNodeManager masterpid
 
-__remoteCallMetaData x = putReg runWorkerNode__impl "runWorkerNode__impl" x
+passthrough__implPl :: Payload -> TaskM Payload
+passthrough__implPl pl = return pl
+
+passthrough__closure :: (Serializable a) => a -> Closure (TaskM a)
+passthrough__closure a = Closure "Remote.Task.passthrough__impl" (serialEncodePure a)
+
+{-      do p <- liftTaskIO $ serialDecode pl
+         case p of
+           Just pp -> return pp
+           Nothing -> error "Failure to extract in passthrough__impl"
+-}
+__remoteCallMetaData x = putReg runWorkerNode__impl "Remote.Task.runWorkerNode__impl" 
+                        (putReg passthrough__implPl "Remote.Task.passthrough__implPl" x)
 
 data MmNewPromise = MmNewPromise (Closure Payload) deriving (Typeable)
 instance Binary MmNewPromise where 
@@ -81,14 +145,32 @@ instance Binary MmNewPromise where
   put (MmNewPromise a) = put a
 
 data MmNewPromiseResponse = MmNewPromiseResponse ProcessId PromiseId 
-                          | MmNewPromiseResponseFail deriving (Typeable,Data)
-instance Binary MmNewPromiseResponse where get=genericGet; put=genericPut
+                          | MmNewPromiseResponseFail deriving (Typeable)
+instance Binary MmNewPromiseResponse where 
+   put (MmNewPromiseResponse a b) =
+           do putWord8 0
+              put a
+              put b
+   put MmNewPromiseResponseFail = putWord8 1
+   get = do a <- getWord8
+            case a of
+              0 -> do b <- get 
+                      c <- get
+                      return $ MmNewPromiseResponse b c
+              1 -> return MmNewPromiseResponseFail
 
-data MmComplain = MmComplain ProcessId PromiseId deriving (Typeable,Data)
-instance Binary MmComplain where get=genericGet; put=genericPut
+data MmComplain = MmComplain ProcessId PromiseId deriving (Typeable)
+instance Binary MmComplain where 
+   put (MmComplain a b) = put a >> put b
+   get = do a <- get
+            b <- get
+            return $ MmComplain a b
 
-data MmComplainResponse = MmComplainResponse ProcessId deriving (Typeable,Data)
-instance Binary MmComplainResponse where get=genericGet; put=genericPut
+data MmComplainResponse = MmComplainResponse ProcessId deriving (Typeable)
+instance Binary MmComplainResponse where
+   put (MmComplainResponse a) = put a
+   get = do a <- get
+            return $ MmComplainResponse a
 
 data TmNewPeer = TmNewPeer NodeId deriving (Typeable,Data)
 instance Binary TmNewPeer where get=genericGet; put=genericPut
@@ -104,11 +186,19 @@ data NmStartResponse = NmStartResponse Bool deriving (Typeable,Data)
 instance Binary NmStartResponse where get=genericGet; put=genericPut
 data NmRedeem = NmRedeem PromiseId deriving (Typeable,Data)
 instance Binary NmRedeem where get=genericGet; put=genericPut
-data NmRedeemResponse = NmRedeemResponse (Maybe Payload) deriving (Typeable)
+data NmRedeemResponse = NmRedeemResponse Payload
+                      | NmRedeemResponseUnknown
+                      | NmRedeemResponseException deriving (Typeable)
 instance Binary NmRedeemResponse where 
-   get = do a <- get
-            return $ NmRedeemResponse a 
-   put (NmRedeemResponse a) = put a
+   get = do a <- getWord8
+            case a of
+              0 -> do b <- get
+                      return $ NmRedeemResponse b
+              1 -> return NmRedeemResponseUnknown
+              2 -> return NmRedeemResponseException
+   put (NmRedeemResponse a) = putWord8 0 >> put a
+   put (NmRedeemResponseUnknown) = putWord8 1
+   put (NmRedeemResponseException) = putWord8 2
 
 data TaskException = TaskException String deriving (Show,Typeable)
 instance Exception TaskException
@@ -116,13 +206,16 @@ instance Exception TaskException
 taskError :: String -> a
 taskError s = throw $ TaskException s
 
-newPromiseId :: IO PromiseId
-newPromiseId = do d <- newUnique
-                  return $ hashUnique d
-
 makePromiseInMemory :: PromiseData -> IO PromiseStorage
 makePromiseInMemory p = do utc <- liftIO $ getCurrentTime
                            return $ PromiseInMemory p utc
+
+chunkify :: Int -> [a] -> [[a]] 
+chunkify numChunks l = splitSize (ceiling $ fromIntegral (length l) / fromIntegral numChunks) l
+   where
+      splitSize i [] = []
+      splitSize i v = let (first,second) = splitAt i v 
+                       in first : splitSize i second
 
 forwardLogs :: Maybe ProcessId -> ProcessM ()
 forwardLogs masterpid = 
@@ -153,30 +246,41 @@ undiskify fp mps =
                                    return Nothing
                       Right r -> return r
 
-diskify :: FilePath -> MVar PromiseStorage -> ProcessM ()
-diskify fp mps =
+diskify :: FilePath -> MVar PromiseStorage -> Bool -> ProcessM ()
+diskify fp mps reallywrite =
       do cfg <- getConfig
-         receiveTimeout (cfgPromiseFlushDelay cfg) []
-         wrap $ liftIO $ modifyMVar_ mps (\val ->
-              case val of
-                  PromiseInMemory payload _ ->
-                      do liftIO $ withFile tmp WriteMode (\h -> hPutPayload h payload)
-                         renameFile tmp fp
-                         return $ PromiseOnDisk fp
-                  _ -> return val)
-   where tmp = fp ++ ".tmp"
+         when (cfgPromiseFlushDelay cfg > 0)
+            (handler (cfgPromiseFlushDelay cfg))
+    where
+         handler delay =
+           do receiveTimeout delay []
+              again <- wrap $ liftIO $ modifyMVar mps (\val ->
+                   case val of
+                       PromiseInMemory payload utc ->
+                           do now <- getCurrentTime
+                              if diffTime now utc > delay
+                                 then do when reallywrite $
+                                             do liftIO $ withFile tmp WriteMode (\h -> hPutPayload h payload)
+                                                renameFile tmp fp
+                                         return (PromiseOnDisk fp,False)
+                                 else return (val,True)
+                       _      -> return (val,False))
+              when again
+                 (diskify fp mps reallywrite)
+         tmp = fp ++ ".tmp"
          wrap a = do res <- ptry a
                      case res of
                          Left z -> do logS "TSK" LoImportant $ "Error writing promise to disk on file "++fp++": "++show (z::IOError)
-                                      return ()
-                         _ -> return ()
+                                      return False
+                         Right v -> return v
 
 startNodeWorker :: ProcessId -> MVar (Map.Map PromiseId (MVar PromiseStorage)) -> MVar PromiseStorage -> Closure Payload -> ProcessM ()
 startNodeWorker masterpid mpc mps clo@(Closure cloname cloarg) = 
   do self <- getSelfPid
-     spawnLocalAnd (starter self) (return ())
+     spawnLocalAnd (starter self) (setDaemonic)
      return ()
-  where starter nodeboss = 
+  where 
+        starter nodeboss = 
             let initialState = TaskState {tsMaster=masterpid,tsNodeBoss=Just nodeboss,tsPromiseCache=mpc,tsRedeemerForwarding=Map.empty}
                 tasker = do tbl <- liftTask $ getLookup
                             case getEntryByIdent tbl cloname of
@@ -184,7 +288,9 @@ startNodeWorker masterpid mpc mps clo@(Closure cloname cloarg) =
                                           do val <- funval cloarg
                                              p <- liftTaskIO $ makePromiseInMemory val
                                              liftTaskIO $ putMVar mps p
-                                             liftTask $ diskify ("rpromise-"++hashClosure clo) mps
+                                             cfg <- liftTask $ getConfig
+                                             let cachefile = cfgPromisePrefix cfg++hashClosure clo
+                                             liftTask $ diskify cachefile mps True
                               Nothing -> taskError $ "Failed looking up "++cloname++" in closure table"
              in do res <- ptry $ runTaskM tasker initialState :: ProcessM (Either SomeException (TaskState,()))
                    case res of
@@ -211,15 +317,22 @@ startNodeManager masterpid =
             nmRedeem = roundtripResponseAsync (\(NmRedeem promise) ans ->
                      let answerer = do pc <- liftIO $ readMVar promisecache
                                        case Map.lookup promise pc of
-                                         Nothing -> ans (NmRedeemResponse Nothing)
+                                         Nothing -> ans NmRedeemResponseUnknown
                                          Just v -> do rv <- liftIO $ readMVar v -- possibly long wait
                                                       case rv of
-                                                         PromiseInMemory rrv _ -> ans (NmRedeemResponse (Just rrv))
+                                                         PromiseInMemory rrv _ -> 
+                                                                do liftIO $ modifyMVar_ v (\_ -> makePromiseInMemory rrv)
+                                                                   ans (NmRedeemResponse rrv)
                                                          PromiseOnDisk fp -> do mpd <- undiskify fp v
-                                                                                ans (NmRedeemResponse mpd)
-                                                         PromiseException _ -> ans (NmRedeemResponse Nothing)
+                                                                                case mpd of
+                                                                                   Nothing -> 
+                                                                                     ans (NmRedeemResponseUnknown)
+                                                                                   Just a ->
+                                                                                     ans (NmRedeemResponse a)
+                                                                                diskify fp v False
+                                                         PromiseException _ -> ans NmRedeemResponseException
                       in do spawnLocal answerer
-                            return promisecache)
+                            return promisecache) False
          in receiveWait [nmStart, nmRedeem, nmTermination, matchUnknownThrow] >>= handler
    in do mypid <- getSelfPid
          monitorProcess mypid masterpid MaMonitor
@@ -280,16 +393,16 @@ runMaster masterproc =
         do recentlist <- findPeers
            let newseen = seen `union` recentlist
            let topidlist = recentlist \\ seen
+           let cleanOut n = filter (\(nid,_) -> nid `elem` recentlist) n
            newlypidded <- mapM (\nid -> 
                              do pid <- runWorkerNode masterpid nid
-                                return (nid,pid)) topidlist
-           
-           (newlist,totalseen) <- liftIO $ modifyMVar nodes (\oldlist -> 
-                        return (oldlist ++ newlypidded,(recentlist,newseen)))
+                                return (nid,pid)) topidlist           
+           (newlist,totalseen) <- liftIO $ modifyMVar nodes (\oldlist ->
+                        return ((cleanOut oldlist) ++ newlypidded,(recentlist,newseen)))
            let newlyadded = totalseen \\ seen
            mapM_ (\nid -> sendSilent masterpid (TmNewPeer nid)) newlyadded
            return totalseen
-     proberDelay = 60000000 -- one minute
+     proberDelay = 10000000
      prober nodes seen masterpid =
         do totalseen <- probeOnce nodes seen masterpid
            receiveTimeout proberDelay [matchUnknownThrow]
@@ -329,11 +442,11 @@ runMaster masterproc =
               (\x -> case x of
                        MmNewPromise clo -> 
                           do 
-                             promiseid <- liftIO $ newPromiseId -- TODO make this part of MasterState, not IO
+                             let promiseid = msNextId state
                              res <- basicAllocate clo promiseid
                              case res of
                                 Just nodeboss -> 
-                                        let newstate = state {msAllocation=newAllocation,msPromises=newPromises}
+                                        let newstate = state {msAllocation=newAllocation,msPromises=newPromises,msNextId=promiseid+1}
                                             newAllocation = Map.insertWith' (\a b -> nub $ a++b) nodeboss [promiseid] (msAllocation state)
                                             newPromises = Map.insert promiseid (nodeboss,clo) (msPromises state)
                                          in return (MmNewPromiseResponse nodeboss promiseid,newstate)
@@ -341,12 +454,13 @@ runMaster masterproc =
                                          return (MmNewPromiseResponseFail,state))
             simpleMsg = match 
               (\x -> case x of
-                       TmNewPeer nid -> return state) {- say ("Found new one " ++ show nid) >> return state) -}
-         in receiveWait [simpleMsg, promiseMsg, complainMsg, matchUnknownThrow] >>= master
+                       TmNewPeer nid -> do logS "TSK" LoInformation $ "Found new peer " ++show nid
+                                           return state)
+         in receiveWait [simpleMsg, promiseMsg, complainMsg] >>= master -- TODO matchUnknownThrow
    in do nodes <- liftIO $ newMVar []
          selfnode <- getSelfNode
          selfpid <- getSelfPid
-         let initState = MasterState {msAllocation=Map.empty, msPromises=Map.empty, msNodes=nodes}
+         let initState = MasterState {msNextId=0, msAllocation=Map.empty, msPromises=Map.empty, msNodes=nodes}
          masterpid <- spawnDaemonic (master initState)
          seennodes <- probeOnce nodes [] masterpid
          res <- liftIO $ withMVar nodes (\n -> return $ lookup selfnode n)
@@ -370,8 +484,12 @@ stubborn n a | n>0
 -- (this might not be possible)
 
 -- TODO: newPromiseWhere :: (Serializable a) => TaskLocality -> QueuingOption -> Closure (TaskM a) -> TaskM (Promise a)
+--       newPromiseLocal :: Closure (TaskM a) -> TaskM (Promise a)
 -- where TaskLocality specifies how to select target node (default round-robin)
 --       QueuingOption is a bool saying to start executing the task immediately, or to queue the task until all previously queued tasks are done
+
+asPromise :: (Serializable a) => a -> TaskM (Promise a)
+asPromise a = newPromise (passthrough__closure a)
 
 newPromise :: (Serializable a) => Closure (TaskM a) -> TaskM (Promise a)
 newPromise clo = 
@@ -395,29 +513,36 @@ readPromise p =
             Nothing -> do fprhost <- lookupForwardedRedeemer prhost
                           res <- liftTask $ roundtripQuery PldUser fprhost (NmRedeem prid) -- possible long wait here
                           case res of
-                             Left _ -> do master <- getMaster
-                                          response <- liftTask $ roundtripQuery PldUser master (MmComplain fprhost prid)
-                                          case response of
-                                            Left a -> taskError $ "Couldn't file complaint with master about " ++ show fprhost ++ " because " ++ show a
-                                            Right (MmComplainResponse newhost) 
-                                              | newhost == nullPid -> taskError $ "Couldn't file complaint with master about " ++ show fprhost
-                                              | otherwise -> do setForwardedRedeemer prhost newhost
-                                                                readPromise p
-                             Right (NmRedeemResponse pl) -> 
-                                case pl of 
-                                  Just thedata -> do pstore <- liftTaskIO $ makePromiseInMemory thedata
+                             Left _ -> complain prhost fprhost prid
+                             Right NmRedeemResponseUnknown -> complain prhost fprhost prid
+                             Right (NmRedeemResponse thedata) -> 
+                                                  do pstore <- liftTaskIO $ makePromiseInMemory thedata
                                                      putPromiseInCache prid pstore
                                                      extractFromPayload thedata
-                                  _ -> taskError "Failed promise redemption" -- don't redeem, this is a terminal failure, mostly likely the promise threw an exception
+                             Right NmRedeemResponseException ->
+                                  taskError "Failed promise redemption" -- don't redeem, this is a terminal failure
             Just mv -> do val <- liftTaskIO $ readMVar mv -- possible long wait here
                           case val of
                              PromiseInMemory v _ -> extractFromPayload v
                              PromiseException _ -> taskError $ "Redemption of promise failed"
-                             PromiseOnDisk _ -> error "PromiseOnDisk not yet supported"
+                             PromiseOnDisk fp -> do mpd <- liftTask $ undiskify fp mv
+                                                    liftTask $ spawnLocal $ diskify fp mv False
+                                                    case mpd of
+                                                       Just dat -> extractFromPayload dat
+                                                       _ -> taskError "Promise extraction from disk failed"
      where extractFromPayload v = do out <- liftTaskIO $ serialDecode v
                                      case out of
                                        Just r -> return r
                                        Nothing -> taskError "Unexpected payload type"
+           complain prhost fprhost prid =
+                     do master <- getMaster
+                        response <- liftTask $ roundtripQuery PldUser master (MmComplain fprhost prid)
+                        case response of
+                          Left a -> taskError $ "Couldn't file complaint with master about " ++ show fprhost ++ " because " ++ show a
+                          Right (MmComplainResponse newhost) 
+                            | newhost == nullPid -> taskError $ "Couldn't file complaint with master about " ++ show fprhost
+                            | otherwise -> do setForwardedRedeemer prhost newhost
+                                              readPromise p
 
 data TaskState = TaskState
       {
@@ -471,33 +596,40 @@ liftTask a = TaskM $ \ts -> a >>= (\x -> return (ts,x))
 liftTaskIO :: IO a -> TaskM a
 liftTaskIO = liftTask . liftIO
 
-type PromiseId = Int
-
-data PromiseList a = PlChunk a (Promise (PromiseList a))
-                   | PlNil deriving Typeable
-
-instance (Binary a) => Binary (PromiseList a) where
-   put (PlChunk a p) = putWord8 0 >> put a >> put p
-   put PlNil = putWord8 1
-   get = do w <- getWord8
-            case w of
-               0 -> do a <- get
-                       p <- get
-                       return $ PlChunk a p
-               1 -> return PlNil
-
-data Promise a = PromiseBasic { psRedeemer :: ProcessId, psId :: PromiseId } deriving Typeable
--- psRedeemer should maybe be wrapped in an IORef so that it can be updated in case of node failure
-
-instance Binary (Promise a) where
-   put (PromiseBasic a b) = put a >> put b
-   get = do a <- get
-            b <- get
-            return $ PromiseBasic a b
-
 remoteCallRectify :: (Serializable a) => ProcessM (TaskM a) -> TaskM Payload
 remoteCallRectify x = 
          do a <- liftTask x
             res <- a
             liftTaskIO $ serialEncode res
+
+
+----------------------------------------------
+-- * MapReduce
+----------------------------------------------
+
+data MapReduce input key middle result 
+    = MapReduce
+      {
+        mtMapper :: [input] -> Closure (TaskM [(key,Promise middle)]),
+        mtReducer :: key -> [Promise middle] -> Closure (TaskM result),
+        mtChunkify :: [input] -> [[input]]
+      }
+
+grouping :: Ord a => [(a,b)] -> [(a,[b])]
+grouping q = 
+    let semi = groupBy (\(a,_) (b,_) -> a==b) (sortBy (\(a,_) (b,_) -> compare a b) q)
+     in map (\x -> (fst $ head x,map snd x)) semi 
+
+mapReduce :: (Serializable i,Ord k,Serializable k,Serializable m,Serializable r) =>
+             MapReduce i k m r -> [i] -> TaskM [r]
+mapReduce mr inputs =
+    let chunks = (mtChunkify mr) inputs 
+     in do 
+           pmapResult <- mapM (\chunk -> 
+                 newPromise ((mtMapper mr) chunk) ) chunks
+           mapResult <- mapM readPromise pmapResult
+           let shuffled = grouping (concat mapResult)
+           pres <- mapM (\(key,ps) -> 
+                  newPromise ((mtReducer mr) key ps)) shuffled
+           mapM readPromise pres
 

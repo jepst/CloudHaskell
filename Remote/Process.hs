@@ -1,4 +1,7 @@
 {-# LANGUAGE DeriveDataTypeable #-}
+
+-- | This module is the core of Cloud Haskell. It provides 
+-- processes, messages, monitoring, and configuration.
 module Remote.Process  (
                        -- * The Process monad
                        ProcessM,
@@ -40,18 +43,21 @@ module Remote.Process  (
 
                        -- * Closures
                        makeClosure,invokeClosure,
+ 
+                       -- * Debugging aids
+                       getQueueLength,nodeFromPid,localFromPid,
 
                        -- * Various internals, not for general use
                        PortId,LocalProcessId,
-                       localRegistryHello,localRegistryRegisterNode,localRegistryQueryNodes,localRegistryUnregisterNode,
-                       sendSimple,makeNodeFromHost,localFromPid,getNewMessageLocal,getProcess,Message,msgPayload,Process,prNodeRef,
+                       localRegistryHello,localRegistryRegisterNode, localRegistryQueryNodes,localRegistryUnregisterNode,
+                       sendSimple,makeNodeFromHost,getNewMessageLocal, getProcess,Message,msgPayload,Process,prNodeRef,
                        roundtripResponse,roundtripResponseAsync,roundtripQuery,roundtripQueryMulti,
-                       makePayloadClosure,getLookup,nodeFromPid,
+                       makePayloadClosure,getLookup,diffTime,
                        PayloadDisposition(..),suppressTransmitException,
 
                        -- * System service processes, not for general use
-                       startSpawnerService,startLoggingService,startProcessMonitorService,startLocalRegistry,startFinalizerService,startNodeMonitorService,
-                       standaloneLocalRegistry
+                       startSpawnerService, startLoggingService, startProcessMonitorService, startLocalRegistry, startFinalizerService,
+                       startNodeMonitorService, standaloneLocalRegistry
                        )
                        where
 
@@ -79,11 +85,12 @@ import Remote.Call (getEntryByIdent,Lookup,empty)
 import Remote.Encoding (serialEncode,serialDecode,serialEncodePure,serialDecodePure,Payload,Serializable,PayloadLength,genericPut,genericGet,hPutPayload,hGetPayload,payloadLength,getPayloadType)
 import System.Environment (getArgs)
 import qualified System.Timeout (timeout)
-import Data.Time (getCurrentTime,diffUTCTime,UTCTime(..),utcToLocalZonedTime)
+import Data.Time (toModifiedJulianDay,Day(..),picosecondsToDiffTime,getCurrentTime,diffUTCTime,UTCTime(..),utcToLocalZonedTime)
 import Remote.Closure (Closure (..))
 import Control.Concurrent.STM (STM,atomically,retry,orElse)
 import Control.Concurrent.STM.TChan (TChan,isEmptyTChan,readTChan,newTChanIO,writeTChan)
 import Control.Concurrent.STM.TVar (TVar,newTVarIO,readTVar,writeTVar)
+import Data.Fixed (Pico)
 
 import Debug.Trace
 
@@ -108,7 +115,8 @@ data Config = Config
              cfgKnownHosts :: ![String], -- ^ A list of hosts where nodes may be running. When 'Remote.Peer.getPeers' or 'Remote.Peer.getPeerStatic' is called, each host on this list will be queried for its nodes. Only matters if you rely on static peer discovery.
              cfgRoundtripTimeout :: Int, -- ^ Microseconds to wait for a response from a system service on a remote node. If your network has high latency or congestion, you may need to increase this to avoid incorrect reports of node inaccessibility.
              cfgArgs :: [String], -- ^ Command-line arguments that are not part of the node configuration are placed here and can be examined by your application
-             cfgPromiseFlushDelay :: Int -- ^ Time in microseconds before an in-memory promise is flushed to disk
+             cfgPromiseFlushDelay :: Int, -- ^ Time in microseconds before an in-memory promise is flushed to disk
+             cfgPromisePrefix :: String -- ^ Prepended to the filename of flushed promises
 --             logConfig :: LogConfig
          } deriving (Show)
 
@@ -297,6 +305,12 @@ getNewMessageLocal node lpid = do mpte <- getProcessTableEntry (node) lpid
                                                     return $ Just msg
                                      Nothing -> return Nothing
                       
+getQueueLength :: ProcessM Int
+getQueueLength = 
+  do p <- getProcess
+     liftIO $ atomically $ 
+          do q <- getCurrentMessages p
+             return $ length q
 
 getCurrentMessages :: Process -> STM [Message]
 getCurrentMessages p = do
@@ -336,7 +350,7 @@ matchMessages matchers msgs = (foldl orElse (retry) (map executor msgs)) `orElse
 -- message matches, Nothing is returned.
 receive :: [MatchM q ()] -> ProcessM (Maybe q)
 receive m = do p <- getProcess
-               res <- liftIO $ atomically $ 
+               res <- convertErrorCall $ liftIO $ atomically $ 
                           do
                              msgs <- getCurrentMessages p
                              matchMessages m (mkMsgs p msgs)
@@ -355,27 +369,8 @@ expect = receiveWait [match return]
 -- a message matches, the corresponding handler is invoked and its result is returned. If no
 -- message matches, the function blocks until a matching message is received.
 receiveWait :: [MatchM q ()] -> ProcessM q
-receiveWait m = 
-            do p <- getProcess
-               v <- attempt1 p
-               attempt2 p v
-      where mkMsgs p msgs = map (\(m,q) -> (m,do ps <- readTVar (prState p)
-                                                 writeTVar (prState p) ps {prQueue = queueFromList q})) (exclusionList msgs)
-            attempt2 p v = 
-                case v of
-                  Just n -> n
-                  Nothing -> do ret <- liftIO $ atomically $ 
-                                         do 
-                                            msg <- getNewMessage p
-                                            ps <- readTVar (prState p)
-                                            let oldq = prQueue ps
-                                            writeTVar (prState p) ps {prQueue = queueInsert oldq msg}
-                                            matchMessages m [(msg,writeTVar (prState p) ps)]
-                                attempt2 p ret
-            attempt1 p = liftIO $ atomically $ 
-                          do
-                             msgs <- getCurrentMessages p
-                             matchMessages m (mkMsgs p msgs)
+receiveWait m = do f <- receiveWaitImpl m
+                   f
 
 -- | Examines the message queue of the current process, matching each message against each of the
 -- provided message pattern clauses (typically provided by a function from the 'match' family). If
@@ -385,7 +380,44 @@ receiveWait m =
 -- If the specified time is 0, this function is equivalent to 'receive'.
 receiveTimeout :: Int -> [MatchM q ()] -> ProcessM (Maybe q)
 receiveTimeout 0 m = receive m
-receiveTimeout to m = ptimeout to $ receiveWait m
+receiveTimeout to m | to > 0 = 
+          do res <- ptimeout to $ receiveWaitImpl m
+             case res of
+               Nothing -> return Nothing
+               Just f -> do q <- f
+                            return $ Just q
+
+receiveWaitImpl :: [MatchM q ()] -> ProcessM (ProcessM q)
+receiveWaitImpl m = 
+            do p <- getProcess
+               v <- attempt1 p
+               attempt2 p v
+      where mkMsgs p msgs = map (\(m,q) -> (m,do ps <- readTVar (prState p)
+                                                 writeTVar (prState p) ps {prQueue = queueFromList q})) (exclusionList msgs)
+            attempt2 p v = 
+                case v of
+                  Just n -> return n
+                  Nothing -> do ret <- convertErrorCall $ liftIO $ atomically $ 
+                                         do 
+                                            msg <- getNewMessage p
+                                            ps <- readTVar (prState p)
+                                            let oldq = prQueue ps
+                                            writeTVar (prState p) ps {prQueue = queueInsert oldq msg}
+                                            matchMessages m [(msg,writeTVar (prState p) ps)]
+                                attempt2 p ret
+            attempt1 p = convertErrorCall $ liftIO $ atomically $ 
+                          do
+                             msgs <- getCurrentMessages p
+                             matchMessages m (mkMsgs p msgs)
+
+convertErrorCall :: ProcessM a -> ProcessM a
+convertErrorCall f =
+   do a <- ptry ff
+      case a of
+        Right c -> return c
+        Left b -> throw $ TransmitException $ QteOther $ show (b::ErrorCall)
+  where ff = do q <- f
+                q `seq` return q
 
 matchDebug :: (Message -> ProcessM q) -> MatchM q ()
 matchDebug f = do mb <- getMatch
@@ -692,21 +724,22 @@ roundtripQueryImpl time pld pid dat converter additional =
                                       case res of
                                         Nothing -> return QteConnectionTimeout
                                         Just other -> return other
-         receiver matchers = case time of
-                        0 -> receiveWait matchers --TODO remove convId
+         receiver matchers = 
+                     case time of
+                        0 -> receiveWait matchers
                         n -> do res <- receiveTimeout n matchers
                                 case res of
                                    Nothing -> return (Left QteConnectionTimeout)
                                    Just a -> return a
 
 roundtripResponse :: (Serializable a, Serializable b) => (a -> ProcessM (b,q)) -> MatchM q ()
-roundtripResponse f = roundtripResponseAsync myf
+roundtripResponse f = roundtripResponseAsync myf False
      where myf inp verf = do (resp,ret) <- f inp
                              verf resp
                              return ret
 
-roundtripResponseAsync :: (Serializable a, Serializable b) => (a -> (b -> ProcessM ()) -> ProcessM q) -> MatchM q ()
-roundtripResponseAsync f =
+roundtripResponseAsync :: (Serializable a, Serializable b) => (a -> (b -> ProcessM ()) -> ProcessM q) -> Bool -> MatchM q ()
+roundtripResponseAsync f throwing =
        matchCore (\(_,h)->conditional h) transformer
    where conditional :: Maybe RoundtripHeader -> Bool
          conditional a = case a of
@@ -717,7 +750,9 @@ roundtripResponseAsync f =
                                  do res <- sendTry (msgheaderSender h) b (Just RoundtripHeader {msgheaderSender=msgheaderDestination h,msgheaderDestination = msgheaderSender h,msgheaderConversationId=msgheaderConversationId h}) PldUser
                                     case res of
                                       QteOK -> return ()
-                                      _ -> throw $ TransmitException res -- TODO this should behave nicer: send a log message, don't throw
+                                      _ -> if throwing
+                                              then throw $ TransmitException res
+                                              else logS "SYS" LoImportant ("roundtripResponse couldn't send response to "++show (msgheaderSender h)++" because "++show res)
 
                              in f m sender
 
@@ -781,18 +816,22 @@ sendRawLocal noderef thepid nodeid msg
 sendRawRemote :: MVar Node -> ProcessId -> NodeId -> Message -> IO TransmitStatus
 sendRawRemote noderef thepid@(ProcessId (NodeId hostname portid) localpid) nodeid msg
      | thepid == nullPid = return QteUnknownPid
-     | otherwise = try setup 
-                          >>= (\x -> case x of
-                                         Right n -> return n
-                                         Left l | isEOFError l -> return $ QteNetworkError (show l)
-                                                | isUserError l -> return QteBadFormat
-                                                | isDoesNotExistError l -> return $ QteNetworkError (show l)
-                                                | otherwise -> return $ QteOther $ show l
-                                      )
-    where setup = bracket (connectTo hostname (PortNumber $ toEnum portid) >>=
-               (\h -> hSetBuffering h (BlockBuffering Nothing) >> return h))
+     | otherwise = 
+         do res <- try setup 
+            case res of
+               Right n -> return n
+               Left l | isEOFError l -> return $ QteNetworkError (show l)
+                      | isUserError l -> return QteBadFormat
+                      | isDoesNotExistError l -> return $ QteNetworkError (show l)
+                      | otherwise -> return $ QteOther $ show l
+    where setup = bracket 
+                 (acquireConnection)
                  (hClose)
                  (sender)
+          acquireConnection = 
+              do h <- connectTo hostname (PortNumber $ toEnum portid)
+                 hSetBuffering h (BlockBuffering Nothing)
+                 return h
           sender h = do cfg <- getConfigI noderef
                         writeMessage h (cfgNetworkMagic cfg,localpid,nodeid,msg)
     
@@ -893,11 +932,17 @@ listenAndDeliver node cfg coord =
          handleCommSafe h ho po = 
             try (handleComm h ho po) >>= (\x -> case x of
               Left l -> case l of
-                           n | isEOFError n -> writeResult h $ QteNetworkError (show n)
-                             | isUserError n -> writeResult h QteBadFormat
-                             | otherwise -> writeResult h (QteOther $ show n)
+                           n | isUserError n -> writeResultTry h QteBadFormat
+                             | otherwise -> logNetworkError n
               Right False -> return ()
               Right True -> handleCommSafe h ho po)
+         logNetworkError :: IOError -> IO ()
+         logNetworkError n = return ()
+         writeResultTry h q =
+            do res <- try (writeResult h q)
+               case res of
+                  Left n -> logNetworkError n >> return ()
+                  Right q -> return ()
          cleanBody n = reverse $ dropWhile isSpace (reverse (dropWhile isSpace n))
          handleComm h hostname portn = 
             do (magic,adestp,nodeid,msg) <- readMessage h
@@ -1003,7 +1048,11 @@ duration t a =
            do time1 <- liftIO $ getCurrentTime
               result <- a
               time2 <- liftIO $ getCurrentTime
-              return (t - picosecondsToMicroseconds (fromEnum (diffUTCTime time2 time1)),result)
+              return (t - diffTime time2 time1,result)
+
+diffTime :: UTCTime -> UTCTime -> Int
+diffTime time2 time1 =
+   picosecondsToMicroseconds (fromEnum (diffUTCTime time2 time1))
    where picosecondsToMicroseconds a = a `div` 1000000
 
 
@@ -1124,6 +1173,7 @@ emptyConfig = Config {
                   cfgKnownHosts = [],
                   cfgRoundtripTimeout = 5000000,
                   cfgPromiseFlushDelay = 5000000,
+                  cfgPromisePrefix = "rpromise-",
                   cfgArgs = []
                   }
 
@@ -1182,6 +1232,7 @@ processConfig rawLines from = foldl processLine from rawLines
   updateCfg cfg "cfgPeerDiscoveryPort" p = cfg {cfgPeerDiscoveryPort=(read.isInt) p}
   updateCfg cfg "cfgRoundtripTimeout" p = cfg {cfgRoundtripTimeout=(read.isInt) p}
   updateCfg cfg "cfgPromiseFlushDelay" p = cfg {cfgPromiseFlushDelay=(read.isInt) p}
+  updateCfg cfg "cfgPromisePrefix" p = cfg {cfgPromisePrefix=p}
   updateCfg cfg "cfgLocalRegistryListenPort" p = cfg {cfgLocalRegistryListenPort=(read.isInt) p}
   updateCfg cfg "cfgKnownHosts" m = cfg {cfgKnownHosts=words m}
   updateCfg cfg "cfgNetworkMagic" m = cfg {cfgNetworkMagic=clean m}
@@ -1266,13 +1317,20 @@ instance Binary LogConfig where
 
 data LogMessage = LogMessage UTCTime LogLevel LogSphere String ProcessId LogTarget
                 | LogUpdateConfig LogConfig deriving (Typeable)
-   
-instance Binary UTCTime where 
-    put (UTCTime a b) = put (fromEnum a) >> put (fromEnum b)
-    get = do a <- get
-             b <- get
-             return $ UTCTime (toEnum a) (toEnum b)
-        
+
+-- This correct instance of UTCTime
+-- works on 32-bit systems and is
+-- courtesy of Warren Harris
+instance Binary UTCTime where
+  put t = do
+    let d = toModifiedJulianDay (utctDay t)
+        s = realToFrac $ utctDayTime t :: Pico
+        ps = truncate $ s * 1e12 :: Integer
+    put d >> put ps
+  get = do
+    d <- get
+    ps <- get
+    return $ UTCTime (ModifiedJulianDay d) (picosecondsToDiffTime ps)
 
 instance Binary LogMessage where
   put (LogMessage utc ll ls s pid target) = putWord8 0 >> put utc >> put ll >> put ls >> put s >> put pid >> put target
@@ -1444,7 +1502,7 @@ pingNode nid = do res <- roundtripQueryUnsafe PldAdmin (adminGetPid nid ServiceN
 
 -- TODO this can be re-engineered to avoid setting up and tearing down TCP connections and threads
 -- at every ping. Instead open up a TCP connection to the pingee and require it to send us a hello
--- every N seconds or die
+-- every N seconds or die. Also, this has a bug in that the number of failures is not reset after a successful ping
 startNodeMonitorService :: ProcessM ()
 startNodeMonitorService = serviceThread ServiceNodeMonitor (service Map.empty)
   where
@@ -2048,7 +2106,7 @@ startSpawnerService = serviceThread ServiceSpawner spawner
                                 Just q -> q
          matchCallRequest = roundtripResponseAsync 
                (\cmd sender -> case cmd of
-                    AmCall clo -> spawnLocal (callWorker clo sender) >> return ())
+                    AmCall clo -> spawnLocal (callWorker clo sender) >> return ()) False
          matchSpawnRequest = roundtripResponse 
                (\cmd -> case cmd of
                     AmSpawn c opt -> 
