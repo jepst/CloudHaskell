@@ -4,12 +4,12 @@ module KMeansCommon where
 import Data.List (foldl')
 import Data.Typeable (Typeable)
 import Data.Data (Data)
-import Remote.Encoding
 import Data.Binary
 import Data.Array.Unboxed
 import qualified Data.ByteString.Lazy as B
 import Debug.Trace
 
+-- Change this and recompile to change the cardinality of the data set!
 vectorSize :: Int
 vectorSize = 100
 
@@ -59,8 +59,13 @@ makeCluster clid vecs = Cluster {clId = clid, clCount = length vecs, clSum = vec
 
 addCluster :: Cluster -> Cluster -> Cluster
 addCluster (Cluster aclid acount asum) (Cluster bclid bcount bsum) = Cluster aclid (acount+bcount) (addVector asum bsum)
+
+addToCluster :: Cluster -> Vector -> Cluster
+addToCluster (Cluster aclid acount asum) v = Cluster aclid (acount+1) (addVector asum v)
+
 addVector :: Vector -> Vector -> Vector
 addVector (Vector a ) (Vector b) = Vector $! listArray (bounds a) (map (\(a,b) -> a+b) (zip (elems a) (elems b)))
+
 zeroVector :: Vector -> Vector
 zeroVector (Vector a) = Vector $! listArray (bounds a) (repeat 0)
 

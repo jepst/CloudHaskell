@@ -103,10 +103,12 @@ getPeersStatic = do cfg <- getConfig
 -- unless your network is highly congested or with high latency.
 getPeersDynamic :: Int -> ProcessM PeerInfo
 getPeersDynamic t = 
-                   do pid <- getSelfPid
-                      cfg <- getConfig
-                      -- TODO should send broacast multiple times in case of packet loss
-                      liftIO $ try $ sendBroadcast (cfgPeerDiscoveryPort cfg) (show pid) :: ProcessM (Either IOError ())
+   do pid <- getSelfPid
+      cfg <- getConfig
+      case (cfgPeerDiscoveryPort cfg) of
+          0 -> return Map.empty
+          port -> do  -- TODO should send broacast multiple times in case of packet loss
+                      liftIO $ try $ sendBroadcast port (show pid) :: ProcessM (Either IOError ())
                       responses <- liftIO $ newMVar []
                       _ <- ptimeout t (receiveInfo responses)
                       res <- liftIO $ takeMVar responses
@@ -142,5 +144,9 @@ waitForDiscovery delay
 -- queries from getPeersDynamic. You don't want to call this yourself,
 -- as it's called for you in 'Remote.Init.remoteInit'
 startDiscoveryService :: ProcessM ()
-startDiscoveryService = spawnLocalAnd service setDaemonic >> return ()
+startDiscoveryService = 
+   do cfg <- getConfig
+      if cfgPeerDiscoveryPort cfg /= 0
+         then spawnLocalAnd service setDaemonic >> return ()
+         else return ()
   where service = waitForDiscovery 0 >> service

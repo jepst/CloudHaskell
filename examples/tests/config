@@ -1,0 +1,103 @@
+# config
+# Cloud Haskell config file.
+# Most Cloud Haskell applications will look for this file
+# in the current directory, although it's ultimately up
+# to the programmer which filename to use or if to
+# use a config file at all. You may override
+# the default location with the RH_CONFIG
+# environment variable.
+# All the options given in this file may
+# also be given on the command line of a
+# Cloud Haskell application. Options on the
+# command line override options in a config
+# file. For example, to set the role of an
+# application, use the following command
+# line:
+#      ./MyApp -cfgRole=MASTER
+#
+#   This is a reasonable default config file.
+
+# The role of a node determines its initial behavior.
+# Typical roles including MASTER or WORKER. Typically,
+# when starting an application, this value must be
+# specified, either here or on the command line.
+# Default: NODE
+cfgRole NODE
+
+# If specified, this option will override the
+# default assignment of host name, which forms
+# port of all node IDs and process IDs originating
+# on this node.
+### cfgHostName somehostname
+
+# If nonzero, will force the node to listen for
+# new incoming connections on a specific port.
+# Otherwise, the port is assigned by the OS.
+# Default: 0
+cfgListenPort 0
+
+# This is the UDP port on which local network
+# broadcasts are sent to discover peers.
+# If 0, no dynamic peer discovery is performed.
+# This value must be the same for all nodes
+# that want to participate in dynamic discovery
+# with each other.
+# Default: 38813
+cfgPeerDiscoveryPort 38813
+
+# A unique token that nodes exchange when they
+# communicate. The intent is to prevent different
+# applications on the same network from mixing
+# up their nodes. This value must be the same
+# for all nodes that want to communicate with each
+# other.
+# Default: MAGIC
+cfgNetworkMagic MAGIC
+
+# Specifies the port where the node registration
+# server will bind. This value must be the same
+# for all nodes that want to communicate with each
+# other.
+# Default: 38813
+cfgLocalRegistryListenPort 38813
+
+# A list of hosts where nodes will be searched for.
+# All hosts that you wish to communicate with should
+# be included in this list. By host name, we mean
+# the DNS name or IP address of a computer accessible
+# over the network interface where a node registry
+# may be running. Hostnames are separate by spaces.
+### cfgKnownHosts somehostname anotherhostname thirdhostname
+
+# The maximum delay, in microseconds, to tolerate
+# delays from service services. In an extremely congested
+# network atmosphere, you may want to increase this.
+# If 0, applications waiting for dead services
+# may wait indefinitely.
+# Default: 10000000
+cfgRoundtripTimeout 10000000
+
+# The maximum number of concurrent outgoing TCP
+# connections (for sending messages) from this node.
+# If outgoing message density is higher than this
+# number, some processes will block.
+# Default: 50
+cfgMaxOutgoing 50
+
+# Relates to the task layer only. The amount of
+# time, in microseconds, to wait for an unused
+# promise to flush to a disk file. Flushing is good,
+# because it frees up memory for other data, but
+# if this value is too low, heavy disk access
+# may slow down your program. If 0, promises
+# are never flush to disk.
+# Default: 5000000
+cfgPromiseFlushDelay 5000000
+
+# Relates to the task layer only. The prefix
+# of the files to be written when they
+# are flushed. May contain a full path.
+# Default: rpromise-
+cfgPromisePrefix rpromise-
+
+

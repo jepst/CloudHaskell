@@ -1,11 +1,7 @@
 {-# LANGUAGE TemplateHaskell,BangPatterns #-}
 module Main where
 
-import Remote.Call
-import Remote.Peer
-import Remote.Process
-import Remote.Init
-import Remote.Encoding
+import Remote
 
 import Data.Ratio
 import Debug.Trace

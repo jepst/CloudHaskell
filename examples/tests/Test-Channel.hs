@@ -1,11 +1,7 @@
 {-# LANGUAGE TemplateHaskell,DeriveDataTypeable #-}
 module Main where	
 
-import Remote.Call 
-import Remote.Process
-import Remote.Init
-import Remote.Encoding
-import Remote.Channel
+import Remote
 
 import Data.Binary (Binary,get,put)
 import Data.Char (isUpper)

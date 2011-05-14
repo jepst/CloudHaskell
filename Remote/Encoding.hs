@@ -35,8 +35,8 @@ instance (Binary a,Typeable a) => Serializable a
 
 data Payload = Payload
                 { 
-                  payloadType :: ByteString,
-                  payloadContent :: ByteString
+                  payloadType :: !ByteString,
+                  payloadContent :: !ByteString
                 } deriving (Typeable)
 type PayloadLength = Int64
 

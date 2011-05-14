@@ -33,7 +33,7 @@ The following code shows how local variable captures works with 'spawnLocal'. Th
 
 Whether a process is running locally or remotely, and whether or not it can share memory, sending messages to it works the same: the 'send' function, which corresponds to Erlang's ! operator.
 
-> send :: (Binary a) => ProcessId -> a -> ProcessM ()
+> send :: (Serializable a) => ProcessId -> a -> ProcessM ()
 
 Given a ProcessId (from 'spawnLocal' or 'spawn') and a chunk of serializable data (implementing Haskell's 'Data.Binary.Binary' type class), we can send a message to the given process. The message will transmitted across the network if necessary and placed in the process's message queue. Note that 'send' will accept any type of data, as long as it implements Binary. Initially, all basic Haskell types implement binary, including tuples and arrays, and it's easy to implement Binary for user-defined types. How then does the receiving process know the type of message to extract from its queue? A message can receive processes by distinguishing their type using the 'receiveWait' function, which corresponds to Erlang's receive clause. The process can provide a distinct handler for each type of process that it knows how to deal with; unmatched messages remain on the queue, where they may be retrieved by later invocations of 'receiveWait'.
 
@@ -89,7 +89,7 @@ The @cfgHostName@ setting indicates to each node the name of the host it's runni
 
 The @cfgKnownHosts@ setting provides a list of hosts that form part of this distributed execution. This is necessary so that the master node can find its subservient slave nodes.
 
-Taken together, these three settings tell each node (a) it's own name, (b) the names of other nodes and (c) their behavioral relationship.
+Taken together, these three settings tell each node (a) its own name, (b) the names of other nodes and (c) their behavioral relationship.
 
 5. Now, run the Pi6 program twice in each of the slave nodes. There should now be four slave nodes awaiting instructions.
 

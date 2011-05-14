@@ -1,5 +1,5 @@
 Name:                remote
-Version:             0.0
+Version:             0.1
 Cabal-Version:       >=1.2
 Description:         Fault-tolerant distributed computing framework
 synopsis:            Fault-tolerant distributed computing framework
@@ -15,5 +15,5 @@ library
   Build-Depends:       base >= 4, time, filepath, containers, network, syb, binary, mtl, bytestring, template-haskell, stm, pureMD5, utf8-string, directory
   ghc-options:         -Wall
   Extensions:          TemplateHaskell, FlexibleInstances, UndecidableInstances, CPP, ExistentialQuantification, DeriveDataTypeable
-  Exposed-Modules:     Remote.Process, Remote.Encoding, Remote.Call, Remote.Peer, Remote.Init, Remote.Closure, Remote.Channel, Remote.Task
+  Exposed-Modules:     Remote.Process, Remote.Encoding, Remote.Call, Remote.Reg, Remote.Peer, Remote.Init, Remote.Closure, Remote.Channel, Remote.Task, Remote
 

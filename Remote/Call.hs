@@ -1,20 +1,11 @@
 {-# LANGUAGE TemplateHaskell #-}
 
+-- | Provides Template Haskell-based tools
+-- and syntactic sugar for dealing with closures
 module Remote.Call (
 -- * Compile-time metadata
          remotable,
          mkClosure,
-         RemoteCallMetaData,
--- * Runtime metadata
-         registerCalls,
-         Lookup,
-         Identifier,
-         putReg,
-         getEntryByIdent,
-         empty,
--- * Re-exports
-         Payload,
-         Closure(..)
         ) where
 
 import Language.Haskell.TH
@@ -29,18 +20,17 @@ import Remote.Encoding (Payload,serialDecode,serialEncode,serialEncodePure,Seria
 import Control.Monad.Trans (liftIO)
 import Control.Monad (liftM)
 import Remote.Closure (Closure(..))
+import Remote.Process (ProcessM)
+import Remote.Reg (Lookup,putReg,RemoteCallMetaData)
+import Remote.Task (remoteCallRectify,TaskM)
 
 ----------------------------------------------
 -- * Compile-time metadata
 ----------------------------------------------
 
--- | Data of this type is generated at compile-time
--- by 'remotable' and can be used with 'registerCalls'
--- to create a metadata lookup table, 'Lookup'.
--- The name '__remoteCallMetaData' will be present
--- in any module that uses 'remotable'.
-type RemoteCallMetaData = Lookup -> Lookup
-
+-- | A compile-time macro to expand a function name to its corresponding
+-- closure name (if such a closure exists), suitable for use with
+-- 'spawn', 'callRemote', etc
 mkClosure :: Name -> Q Exp
 mkClosure n = do info <- reify n
                  case info of
@@ -52,18 +42,60 @@ mkClosure n = do info <- reify n
                               _ -> error $ "Unexpected type of closure symbol for "++show n
                     _ -> error $ "No closure corresponding to "++show n
 
+-- | A compile-time macro to provide easy invocation of closures.
+-- To use this, follow the following steps:
+--
+-- 1. First, enable Template Haskell in the module:
+--
+-- > {-# LANGUAGE TemplateHaskell #-}
+-- > module Main where
+-- > import Remote.Call (remotable)
+-- >    ...
+--
+-- 2. Define your functions normally. Restrictions: no polymorphism; all parameters must be Serializable; return value must be pure, or in one of the 'ProcessM', 'TaskM', or 'IO' monads; probably other restrictions as well.
+--
+-- > greet :: String -> ProcessM ()
+-- > greet name = say ("Hello, "++name)
+-- > badFac :: Integer -> Integer
+-- > badFac 0 = 1
+-- > badFac 1 = 1
+-- > badFac n = badFac (n-1) + badFac (n-2)
+--
+-- 3. Automagically generate stubs and closures for your functions like this:
+--
+-- > $( remotable ['greet, 'badFac] )
+--
+-- 'remotable' may be used only once per module.
+--
+-- 4. When you call 'remoteInit' (usually the first thing in your main function), 
+-- be sure to give it the automagically generated function lookup tables
+-- from all modules that use 'remotable':
+--
+-- > main = remoteInit (Just "config") [Main.__remoteCallMetaData, OtherModule.__remoteCallMetaData] initialProcess
+--
+-- 5. Now you can invoke your functions remotely. When a function expects a closure, give it the name
+-- of the generated closure, rather than the name of the original function. If the function takes parameters,
+-- so will the closure.
+--
+-- To start the @greet@ function on @someNode@:
+--
+-- > spawn someNode (greet__closure "John Baptist")
+--
+-- Note that we say @greet__closure@ rather than just @greet@. If you prefer, you can use 'mkClosure' instead, i.e. @$(mkClosure 'greet)@, which will expand to @greet_closure@. To calculate a factorial remotely:
+--
+-- > val <- callRemotePure someNode (badFac__closure 5)
 remotable :: [Name] -> Q [Dec]
 remotable names =
     do info <- liftM concat $ mapM getType names 
        loc <- location
-       let declGen = map (makeDec loc) info
+       declGen <- mapM (makeDec loc) info
        decs <- sequence $ concat (map fst declGen)
        let outnames = concat $ map snd declGen
        regs <- sequence $ makeReg loc outnames
        return $ decs ++ regs
     where makeReg loc names = 
               let
-                      mkentry = [e| Remote.Call.putReg |]
+                      mkentry = [e| putReg |]
                       regtype = [t| RemoteCallMetaData |]
                       registryName = (mkName "__remoteCallMetaData")
                       reasonableNameModule name = maybe (loc_module loc++".") ((flip (++))".") (nameModule name)
@@ -77,84 +109,87 @@ remotable names =
                       dec = funD registryName [clause [varP param] bodyq []]
                in [sig,dec]
           makeDec loc (aname,atype) =
-              let
-                 implName = mkName (nameBase aname ++ "__impl") 
-                 implPlName = mkName (nameBase aname ++ "__implPl")
-                 implFqn = loc_module loc ++"." ++ nameBase aname ++ "__impl"
-                 closureName = mkName (nameBase aname ++ "__closure")
-                 paramnames = map (\x -> 'a' : show x) [1..(length (init arglist))]
-                 paramnamesP = (map (varP . mkName) paramnames)
-                 paramnamesE = (map (varE . mkName) paramnames)
-                 closurearglist = init arglist ++ [processmtoclosure (last arglist)]
-                 implarglist = payload : [toPayload (last arglist)]
-                 toProcessM a = (AppT (ConT (mkName "Remote.Process.ProcessM")) a)
-                 toPayload x = case funtype of
-                                  0 -> case x of
-                                        (AppT (ConT n) _) -> (AppT (ConT n) payload)
-                                        _ -> toProcessM payload
-                                  _ -> toProcessM payload
-                 processmtoclosure (x) =  (AppT (ConT (mkName "Remote.Call.Closure")) x)
-                 isarrowful = isarrow $ last arglist
-                 isarrow (AppT (AppT ArrowT _) _) = True
-                 isarrow (AppT (ConT process) v) 
-                     | isarrow v && (show process == "Remote.Task.TaskM" || show process == "Remote.Process.ProcessM") = True
-                 isarrow _ = False
-                 applyargs f [] = f
-                 applyargs f (l:r) = applyargs (appE f l) r
-                 funtype = case last arglist of
-                              (AppT (ConT process) _) | show process == "Remote.Process.ProcessM" -> 0
-                                                      | show process == "GHC.Types.IO" -> 1
-                              _ -> 2
-                 payload = ConT ( mkName "Remote.Call.Payload")
-                 just a = conP (mkName "Prelude.Just") [a]
-                 errorcall = [e| Prelude.error |]
-                 liftio = [e| Control.Monad.Trans.liftIO |]
-                 returnf = [e| Prelude.return |]
-                 asProcessM x = case funtype of
-                                  0 -> x
-                                  1 -> case x of
-                                         (AppT (ConT _) a) -> AppT (ConT (mkName "Remote.Process.ProcessM")) a
-                                         _ -> AppT (ConT (mkName "Remote.Process.ProcessM")) x
-                                  2 -> AppT (ConT (mkName "Remote.Process.ProcessM")) x
-                 lifter x = case funtype of
-                                0 -> x
-                                1 -> appE liftio x
-                                _ -> appE returnf x
-                 decodecall = [e| Remote.Encoding.serialDecode |]
-                 encodecallio = [e| Remote.Encoding.serialEncode |]
-                 encodecall = [e| Remote.Encoding.serialEncodePure |]
-                 closurecall = [e| Remote.Closure.Closure |]
-                 closuredec = sigD closureName (return $ putParams closurearglist)
-                 closuredef = funD closureName [clause paramnamesP
-                                        (normalB (appE (appE closurecall (litE (stringL implFqn))) (appE encodecall (tupE paramnamesE))))
-                                        []
-                                       ]
-                 impldec = sigD implName (appT (appT arrowT (return payload)) (return $ asProcessM $ last arglist))
-                 impldef = funD implName [clause [varP (mkName "a")]
-                                         (normalB (doE [bindS (varP (mkName "res")) (appE liftio (appE decodecall (varE (mkName "a")))),
-                                                       noBindS (caseE (varE (mkName "res"))
-                                                             [match (just (tupP paramnamesP)) (normalB (lifter (applyargs (varE aname) paramnamesE))) [],
-                                                              match wildP (normalB (appE (errorcall) (litE (stringL ("Bad decoding in closure splice of "++nameBase aname))))) []])
-                                                      ]))
-                                         []]
-                 implPls = if isarrowful then [implPldec,implPldef] else []
-                 implPldec = case last arglist of
-                              (AppT (ConT process) v) | show process == "Remote.Task.TaskM" ->
-                                   sigD implPlName (return $ putParams $ [payload,(AppT (ConT process) payload)])
-                              _ -> sigD implPlName (return $ putParams implarglist)
-                 implPldef = case last arglist of
-                              (AppT (ConT process) _) | show process == "Remote.Task.TaskM" ->
-                                   funD implPlName [clause [varP (mkName "a")]
-                                                  (normalB (appE (varE (mkName "Remote.Task.remoteCallRectify")) (appE (varE implName) (varE (mkName "a") )))) []
-                                        ]
-                              _ -> funD implPlName [clause [varP (mkName "a")]
+              do payload <- [t| Payload |]
+                 ttprocessm <- [t| ProcessM |]
+                 tttaskm <- [t| TaskM |]
+                 ttclosure <- [t| Closure |]
+                 ttio <- [t| IO |]
+                 return $ let
+                    implName = mkName (nameBase aname ++ "__impl") 
+                    implPlName = mkName (nameBase aname ++ "__implPl")
+                    implFqn = loc_module loc ++"." ++ nameBase aname ++ "__impl"
+                    closureName = mkName (nameBase aname ++ "__closure")
+                    paramnames = map (\x -> 'a' : show x) [1..(length (init arglist))]
+                    paramnamesP = (map (varP . mkName) paramnames)
+                    paramnamesE = (map (varE . mkName) paramnames)
+                    closurearglist = init arglist ++ [processmtoclosure (last arglist)]
+                    implarglist = payload : [toPayload (last arglist)]
+                    toProcessM a = (AppT ttprocessm a)
+                    toPayload x = case funtype of
+                                     0 -> case x of
+                                           (AppT (ConT n) _) -> (AppT (ConT n) payload)
+                                           _ -> toProcessM payload
+                                     _ -> toProcessM payload
+                    processmtoclosure (x) =  (AppT ttclosure x)
+                    isarrowful = isarrow $ last arglist
+                    isarrow (AppT (AppT ArrowT _) _) = True
+                    isarrow (AppT (process) v) 
+                        | isarrow v && (process == tttaskm || process == ttprocessm) = True
+                    isarrow _ = False
+                    applyargs f [] = f
+                    applyargs f (l:r) = applyargs (appE f l) r
+                    funtype = case last arglist of
+                                 (AppT (process) _) |  process == ttprocessm -> 0
+                                                    |  process == ttio -> 1
+                                 _ -> 2
+                    just a = conP (mkName "Prelude.Just") [a]
+                    errorcall = [e| Prelude.error |]
+                    liftio = [e| Control.Monad.Trans.liftIO |]
+                    returnf = [e| Prelude.return |]
+                    asProcessM x = case funtype of
+                                     0 -> x
+                                     1 -> case x of
+                                            (AppT (ConT _) a) -> AppT ttprocessm a
+                                            _ -> AppT ttprocessm x
+                                     2 -> AppT ttprocessm x
+                    lifter x = case funtype of
+                                   0 -> x
+                                   1 -> appE liftio x
+                                   _ -> appE returnf x
+                    decodecall = [e| Remote.Encoding.serialDecode |]
+                    encodecallio = [e| Remote.Encoding.serialEncode |]
+                    encodecall = [e| Remote.Encoding.serialEncodePure |]
+                    closurecall = [e| Remote.Closure.Closure |]
+                    closuredec = sigD closureName (return $ putParams closurearglist)
+                    closuredef = funD closureName [clause paramnamesP
+                                           (normalB (appE (appE closurecall (litE (stringL implFqn))) (appE encodecall (tupE paramnamesE))))
+                                           []
+                                          ]
+                    impldec = sigD implName (appT (appT arrowT (return payload)) (return $ asProcessM $ last arglist))
+                    impldef = funD implName [clause [varP (mkName "a")]
+                                            (normalB (doE [bindS (varP (mkName "res")) (appE liftio (appE decodecall (varE (mkName "a")))),
+                                                          noBindS (caseE (varE (mkName "res"))
+                                                                [match (just (tupP paramnamesP)) (normalB (lifter (applyargs (varE aname) paramnamesE))) [],
+                                                                 match wildP (normalB (appE (errorcall) (litE (stringL ("Bad decoding in closure splice of "++nameBase aname))))) []])
+                                                         ]))
+                                            []]
+                    implPls = if isarrowful then [implPldec,implPldef] else []
+                    implPldec = case last arglist of
+                                 (AppT ( process) v) |  process == tttaskm ->
+                                      sigD implPlName (return $ putParams $ [payload,(AppT process payload)])
+                                 _ -> sigD implPlName (return $ putParams implarglist)
+                    implPldef = case last arglist of
+                                 (AppT ( process) _) |  process == tttaskm ->
+                                      funD implPlName [clause [varP (mkName "a")]
+                                                     (normalB (appE [e| remoteCallRectify |] (appE (varE implName) (varE (mkName "a") )))) []
+                                           ]
+                                 _ -> funD implPlName [clause [varP (mkName "a")]
                                          (normalB (doE [bindS (varP (mkName "res")) ( (appE (varE implName) (varE (mkName "a")))),
                                                        noBindS (appE liftio (appE encodecallio (varE (mkName "res")))) ] )) [] ] 
-                 arglist = getParams atype
-              in
-                 case funtype of
-                      _ -> ([closuredec,closuredef,impldec,impldef]++if not isarrowful then [implPldec,implPldef] else [],
-                            [aname,implName]++if not isarrowful then [implPlName] else [])
+                    arglist = getParams atype
+                  in ([closuredec,closuredef,impldec,impldef]++if not isarrowful then [implPldec,implPldef] else [],
+                              [aname,implName]++if not isarrowful then [implPlName] else [])
+ 
           getType name = 
              do info <- reify name
                 case info of 
@@ -168,46 +203,4 @@ remotable names =
                             AppT (AppT ArrowT b) c -> b : getParams c
                             b -> [b]
                                 
-----------------------------------------------
--- * Run-time metadata
-----------------------------------------------
-
-type Identifier = String
-
-data Entry = Entry {
-               entryName :: Identifier,
-               entryFunRef :: Dynamic
-             }
-
--- | Creates a metadata lookup table based on compile-time metadata.
--- You probably don't want to call this function yourself, but instead
--- use 'Remote.Init.remoteInit'.
-registerCalls :: [RemoteCallMetaData] -> Lookup
-registerCalls [] = empty
-registerCalls (h:rest) = let registered = registerCalls rest
-                          in h registered
-
-makeEntry :: (Typeable a) => Identifier -> a -> Entry
-makeEntry ident funref = Entry {entryName=ident, entryFunRef=toDyn funref}
-
-type IdentMap = Map.Map Identifier Entry
-data Lookup = Lookup { identMap :: IdentMap }
-
-putReg :: (Typeable a) => a -> Identifier -> Lookup -> Lookup
-putReg a i l = putEntry l a i
-
-putEntry :: (Typeable a) => Lookup -> a -> Identifier -> Lookup
-putEntry amap value name = 
-                             Lookup {
-                                identMap = Map.insert name entry (identMap amap)
-                             }
-  where
-       entry = makeEntry name value
-
-
-getEntryByIdent :: (Typeable a) => Lookup -> Identifier -> Maybe a
-getEntryByIdent amap ident = (Map.lookup ident (identMap amap)) >>= (\x -> fromDynamic (entryFunRef x))
-
-empty :: Lookup
-empty = Lookup {identMap = Map.empty}
 

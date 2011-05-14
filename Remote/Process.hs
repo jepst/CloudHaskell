@@ -6,7 +6,7 @@ module Remote.Process  (
                        -- * The Process monad
                        ProcessM,
                        NodeId,ProcessId,
-                       PeerInfo,Node,
+                       PeerInfo,
                        nullPid,getSelfPid,getSelfNode,isPidLocal,
 
                        -- * Message receiving
@@ -20,11 +20,11 @@ module Remote.Process  (
                        -- * Logging functions
                        logS,say,
                        LogSphere(..),LogLevel(..),LogTarget(..),LogFilter(..),LogConfig(..),
-                       setLogConfig,getLogConfig,setNodeLogConfig,setRemoteNodeLogConfig,
+                       setLogConfig,getLogConfig,setNodeLogConfig,setRemoteNodeLogConfig,defaultLogConfig,
 
                        -- * Exception handling
                        ptry,ptimeout,pbracket,pfinally,
-                       UnknownMessageException(..),
+                       UnknownMessageException(..),ServiceException(..),
                        TransmitException(..),TransmitStatus(..),
 
                        -- * Process spawning and monitoring
@@ -35,7 +35,7 @@ module Remote.Process  (
                        terminate,
 
                        -- * Config file
-                       readConfig,emptyConfig,Config(..),getConfig,
+                       readConfig,emptyConfig,Config(..),getConfig, getCfgArgs,
 
                        -- * Initialization
                        initNode,roleDispatch,setDaemonic,
@@ -45,15 +45,15 @@ module Remote.Process  (
                        makeClosure,invokeClosure,
  
                        -- * Debugging aids
-                       getQueueLength,nodeFromPid,localFromPid,
+                       getQueueLength,nodeFromPid,localFromPid,hostFromNid,
 
                        -- * Various internals, not for general use
                        PortId,LocalProcessId,
                        localRegistryHello,localRegistryRegisterNode, localRegistryQueryNodes,localRegistryUnregisterNode,
                        sendSimple,makeNodeFromHost,getNewMessageLocal, getProcess,Message,msgPayload,Process,prNodeRef,
                        roundtripResponse,roundtripResponseAsync,roundtripQuery,roundtripQueryMulti,
-                       makePayloadClosure,getLookup,diffTime,
-                       PayloadDisposition(..),suppressTransmitException,
+                       makePayloadClosure,getLookup,diffTime,roundtripQueryImpl,roundtripQueryUnsafe,
+                       PayloadDisposition(..),suppressTransmitException,Node,
 
                        -- * System service processes, not for general use
                        startSpawnerService, startLoggingService, startProcessMonitorService, startLocalRegistry, startFinalizerService,
@@ -62,14 +62,13 @@ module Remote.Process  (
                        where
 
 import Control.Concurrent (forkIO,ThreadId,threadDelay)
-import Control.Concurrent.MVar (MVar,newMVar, newEmptyMVar,isEmptyMVar,takeMVar,putMVar,modifyMVar_,readMVar)
+import Control.Concurrent.MVar (withMVar,MVar,newMVar, newEmptyMVar,isEmptyMVar,takeMVar,putMVar,modifyMVar,modifyMVar_,readMVar)
 import Prelude hiding (catch)
 import Control.Exception (ErrorCall(..),throwTo,bracket,try,Exception,throw,evaluate,finally,SomeException,PatternMatchFail(..),catch)
-import Control.Monad (foldM,when,liftM)
+import Control.Monad (foldM,when,liftM,forever)
 import Control.Monad.Trans (MonadTrans,lift,MonadIO,liftIO)
 import Data.Binary (Binary,put,get,putWord8,getWord8)
 import Data.Char (isSpace,isDigit)
-import Data.Generics (Data)
 import Data.List (isSuffixOf,foldl', isPrefixOf,nub)
 import Data.Maybe (listToMaybe,catMaybes,fromJust,isNothing)
 import Data.Typeable (Typeable)
@@ -81,7 +80,7 @@ import Network.BSD (HostEntry(..),getHostName)
 import Network (HostName,PortID(..),PortNumber(..),listenOn,accept,sClose,connectTo,Socket)
 import Network.Socket (PortNumber(..),setSocketOption,SocketOption(..),socketPort,aNY_PORT )
 import qualified Data.Map as Map (Map,keys,fromList,unionWith,elems,singleton,member,update,map,empty,adjust,alter,insert,delete,lookup,toList,size,insertWith')
-import Remote.Call (getEntryByIdent,Lookup,empty)
+import Remote.Reg (getEntryByIdent,Lookup,empty)
 import Remote.Encoding (serialEncode,serialDecode,serialEncodePure,serialDecodePure,Payload,Serializable,PayloadLength,genericPut,genericGet,hPutPayload,hGetPayload,payloadLength,getPayloadType)
 import System.Environment (getArgs)
 import qualified System.Timeout (timeout)
@@ -89,10 +88,11 @@ import Data.Time (toModifiedJulianDay,Day(..),picosecondsToDiffTime,getCurrentTi
 import Remote.Closure (Closure (..))
 import Control.Concurrent.STM (STM,atomically,retry,orElse)
 import Control.Concurrent.STM.TChan (TChan,isEmptyTChan,readTChan,newTChanIO,writeTChan)
+import Control.Concurrent.Chan (Chan,newChan,readChan,writeChan)
 import Control.Concurrent.STM.TVar (TVar,newTVarIO,readTVar,writeTVar)
+import Control.Concurrent.QSem (QSem,newQSem,waitQSem,signalQSem)
+import Data.IORef (IORef,newIORef,readIORef,writeIORef)
 import Data.Fixed (Pico)
-
-import Debug.Trace
 
 ----------------------------------------------
 -- * Process monad
@@ -106,17 +106,18 @@ type LocalProcessId = Int
 -- command line; in either case, see 'Remote.Init.remoteInit' and 'readConfig'
 data Config = Config 
          {
-             cfgRole :: !String, -- ^ The user-assigned role of this node determines what its initial behavior is and how it presents itself to its peers
+             cfgRole :: !String, -- ^ The user-assigned role of this node determines what its initial behavior is and how it presents itself to its peers. Default to NODE
              cfgHostName :: !HostName, -- ^ The hostname, used as a basis for creating the name of the node. If unspecified, the OS will be queried. Since the hostname is part of the nodename, the computer must be accessible to other nodes using this name.
-             cfgListenPort :: !PortId, -- ^ The TCP port on which to listen to for new connections. If unassigned, the OS will assign a free port.
+             cfgListenPort :: !PortId, -- ^ The TCP port on which to listen to for new connections. If unassigned or 0, the OS will assign a free port.
              cfgLocalRegistryListenPort :: !PortId, -- ^ The TCP port on which to communicate with the local node registry, or to start the local node registry if it isn't already running. This defaults to 38813 and shouldn't be changed unless you have prohibitive firewall rules
              cfgPeerDiscoveryPort :: !PortId, -- ^ The UDP port on which local peer discovery broadcasts are sent. Defaults to 38813, and only matters if you rely on dynamic peer discovery
              cfgNetworkMagic :: !String, -- ^ The unique identifying string for this network or application. Must not contain spaces. The uniqueness of this string ensures that multiple applications running on the same physical network won't accidentally communicate with each other. All nodes of your application should have the same network magic. Defaults to MAGIC
              cfgKnownHosts :: ![String], -- ^ A list of hosts where nodes may be running. When 'Remote.Peer.getPeers' or 'Remote.Peer.getPeerStatic' is called, each host on this list will be queried for its nodes. Only matters if you rely on static peer discovery.
-             cfgRoundtripTimeout :: Int, -- ^ Microseconds to wait for a response from a system service on a remote node. If your network has high latency or congestion, you may need to increase this to avoid incorrect reports of node inaccessibility.
-             cfgArgs :: [String], -- ^ Command-line arguments that are not part of the node configuration are placed here and can be examined by your application
-             cfgPromiseFlushDelay :: Int, -- ^ Time in microseconds before an in-memory promise is flushed to disk
-             cfgPromisePrefix :: String -- ^ Prepended to the filename of flushed promises
+             cfgRoundtripTimeout :: !Int, -- ^ Microseconds to wait for a response from a system service on a remote node. If your network has high latency or congestion, you may need to increase this to avoid incorrect reports of node inaccessibility. 0 to wait indefinitely (not recommended).
+             cfgMaxOutgoing :: !Int, -- ^ A limit on the number of simultaneous outgoing connections per node
+             cfgPromiseFlushDelay :: !Int, -- ^ Time in microseconds before an in-memory promise is flushed to disk. 0 to disable disk flush entirely.
+             cfgPromisePrefix :: !String, -- ^ Prepended to the filename of flushed promises.
+             cfgArgs :: [String] -- ^ Command-line arguments that are not part of the node configuration are placed here and can be examined by your application
 --             logConfig :: LogConfig
          } deriving (Show)
 
@@ -137,15 +138,22 @@ data Node = Node
            ndLookup :: Lookup,
            ndLogConfig :: LogConfig,
            ndNodeFinalizer :: MVar (),
-           ndNodeFinalized :: MVar ()
+           ndNodeFinalized :: MVar (),
+           ndOutgoing :: QSem,
+           ndNextProcessId :: LocalProcessId
            --conncetion table -- each one is MVared
            --  also contains time info about last contact
        }
 
+-- | Identifies a node somewhere on the network. These
+-- can be queried from 'getPeers'. See also 'getSelfNode'
+data NodeId = NodeId !HostName !PortId deriving (Typeable,Eq,Ord)
 
-data NodeId = NodeId HostName PortId deriving (Data,Typeable,Eq,Ord)
-
-data ProcessId = ProcessId NodeId LocalProcessId deriving (Data,Typeable,Eq,Ord)
+-- | Identifies a process somewhere on the network. These
+-- are produced by the 'spawn' family of functions and
+-- consumed by 'send'. When a process ends, its process ID
+-- ceases to be valid. See also 'getSelfPid'
+data ProcessId = ProcessId !NodeId !LocalProcessId deriving (Typeable,Eq,Ord)
 
 instance Binary NodeId where
    put (NodeId h p) = put h >> put p
@@ -201,7 +209,7 @@ data Message = Message
    {
        msgDisposition :: PayloadDisposition,
        msgHeader :: Maybe Payload,
-       msgPayload :: Payload
+       msgPayload :: !Payload
    }
 
 data ProcessTableEntry = ProcessTableEntry
@@ -226,10 +234,14 @@ data Process = Process
        prThread :: ThreadId,
        prChannel :: TChan Message,
        prState :: TVar ProcessState,
+       prPool :: IORef (Map.Map NodeId Handle),
        prLogConfig :: Maybe LogConfig
    } 
                            
-
+-- | The monad ProcessM is the core of the process layer. Functions
+-- in the ProcessM monad may participate in messaging and create
+-- additional concurrent processes. You can create
+-- a ProcessM context from an 'IO' context with the 'remoteInit' function.
 data ProcessM a = ProcessM {runProcessM :: Process -> IO (Process,a)} deriving Typeable
 
 instance Monad ProcessM where
@@ -244,6 +256,13 @@ instance MonadIO ProcessM where
 
 getProcess :: ProcessM (Process)
 getProcess = ProcessM $ \x -> return (x,x)
+
+-- | Returns command-line arguments provided to the
+-- executable, excluding any command line arguments
+-- that were processed by the framework.
+getCfgArgs :: ProcessM [String]
+getCfgArgs = do cfg <- getConfig
+                return $ cfgArgs cfg
 
 getConfig :: ProcessM (Config)
 getConfig = do p <- getProcess
@@ -266,6 +285,11 @@ putProcess p = ProcessM $ \_ -> return (p,())
 -- * Message pattern matching
 ----------------------------------------------
 
+-- | This monad provides the state and structure for
+-- matching received messages from the incoming message queue.
+-- It's the interface between the 'receive' family of functions,
+-- and the 'match' family, which together can express which
+-- messages can be accepted.
 data MatchM q a = MatchM { runMatchM :: MatchBlock -> STM ((MatchBlock,Maybe (ProcessM q)),a) }
 
 instance Monad (MatchM q) where
@@ -353,14 +377,19 @@ receive m = do p <- getProcess
                res <- convertErrorCall $ liftIO $ atomically $ 
                           do
                              msgs <- getCurrentMessages p
-                             matchMessages m (mkMsgs p msgs)
+                             matchMessages m (messageHandlerGenerator (prState p) msgs)
                case res of
                   Nothing -> return Nothing
                   Just n -> do q <- n
                                return $ Just q
-      where mkMsgs p msgs = map (\(m,q) -> (m,do ps <- readTVar (prState p)
-                                                 writeTVar (prState p) ps {prQueue = queueFromList q})) (exclusionList msgs)
 
+-- | A simple way to receive messages. 
+-- This will return the first message received
+-- of the specified type; if no such message
+-- is available, the function will block.
+-- Unlike the 'receive' family of functions,
+-- this function does not allow the notion
+-- of choice in message extraction.
 expect :: (Serializable a) => ProcessM a
 expect = receiveWait [match return]
 
@@ -371,6 +400,7 @@ expect = receiveWait [match return]
 receiveWait :: [MatchM q ()] -> ProcessM q
 receiveWait m = do f <- receiveWaitImpl m
                    f
+
 
 -- | Examines the message queue of the current process, matching each message against each of the
 -- provided message pattern clauses (typically provided by a function from the 'match' family). If
@@ -387,13 +417,18 @@ receiveTimeout to m | to > 0 =
                Just f -> do q <- f
                             return $ Just q
 
+messageHandlerGenerator :: TVar ProcessState -> [Message] -> [(Message, STM ())]
+messageHandlerGenerator prSt msgs = 
+     map (\(m,q) -> (m,do ps <- readTVar prSt
+                          writeTVar prSt ps {prQueue = queueFromList q})) (exclusionList msgs)
+
+
 receiveWaitImpl :: [MatchM q ()] -> ProcessM (ProcessM q)
 receiveWaitImpl m = 
             do p <- getProcess
                v <- attempt1 p
                attempt2 p v
-      where mkMsgs p msgs = map (\(m,q) -> (m,do ps <- readTVar (prState p)
-                                                 writeTVar (prState p) ps {prQueue = queueFromList q})) (exclusionList msgs)
+      where 
             attempt2 p v = 
                 case v of
                   Just n -> return n
@@ -408,7 +443,7 @@ receiveWaitImpl m =
             attempt1 p = convertErrorCall $ liftIO $ atomically $ 
                           do
                              msgs <- getCurrentMessages p
-                             matchMessages m (mkMsgs p msgs)
+                             matchMessages m (messageHandlerGenerator (prState p) msgs)
 
 convertErrorCall :: ProcessM a -> ProcessM a
 convertErrorCall f =
@@ -467,12 +502,12 @@ matchCore cond body =
         let    
            decodified = serialDecodePure (msgPayload (mbMessage mb))
            decodifiedh = maybe (Nothing) (serialDecodePure) (msgHeader (mbMessage mb))
-        in
-           case decodified of
-             Just x -> if cond (x,decodifiedh) 
-                          then returnHalt () (body (x,decodifiedh))
-                          else liftSTM retry
-             Nothing -> liftSTM retry
+        in decodified `seq` decodifiedh `seq`
+            case decodified of
+              Just x -> if cond (x,decodifiedh) 
+                           then returnHalt () (body (x,decodifiedh))
+                           else liftSTM retry
+              Nothing -> liftSTM retry
 
 
 
@@ -480,18 +515,29 @@ matchCore cond body =
 -- * Exceptions and return values
 ----------------------------------------------
 
+-- | Thrown in response to a bad configuration
+-- file or command line option, most likely
+-- in 'Config'
 data ConfigException = ConfigException String deriving (Show,Typeable)
 instance Exception ConfigException
 
+-- | Thrown by various network-related functions when
+-- communication with a host has failed
 data TransmitException = TransmitException TransmitStatus deriving (Show,Typeable)
 instance Exception TransmitException
 
+-- | Thrown by 'matchUnknownThrow' in response to a message
+-- of a wrong type being received by a process
 data UnknownMessageException = UnknownMessageException String deriving (Show,Typeable)
 instance Exception UnknownMessageException
 
+-- | Thrown by "Remote.Process" system services in response
+-- to some problem
 data ServiceException = ServiceException String deriving (Show,Typeable)
 instance Exception ServiceException
 
+-- | Used internally by 'terminate' to mark the orderly termination
+-- of a process
 data ProcessTerminationException = ProcessTerminationException deriving (Show,Typeable)
 instance Exception ProcessTerminationException
 
@@ -506,11 +552,38 @@ data TransmitStatus = QteOK
                     | QteDispositionFailed
                     | QteLoggingError
                     | QteConnectionTimeout
-                    | QteUnknownCommand deriving (Show,Read,Typeable,Data) --TODO remove Data
+                    | QteUnknownCommand 
+                    | QteThrottle Int deriving (Show,Read,Typeable)
 
 instance Binary TransmitStatus where
-  put = genericPut
-  get = genericGet
+   put QteOK = putWord8 0
+   put QteUnknownPid = putWord8 1
+   put QteBadFormat = putWord8 2
+   put (QteOther s) = putWord8 3 >> put s
+   put QtePleaseSendBody = putWord8 4
+   put QteBadNetworkMagic = putWord8 5
+   put (QteNetworkError s) = putWord8 6 >> put s
+   put (QteEncodingError s) = putWord8 7 >> put s
+   put QteDispositionFailed = putWord8 8
+   put QteLoggingError = putWord8 9
+   put QteConnectionTimeout = putWord8 10
+   put QteUnknownCommand = putWord8 11
+   put (QteThrottle s) = putWord8 12
+   get = do ch <- getWord8
+            case ch of
+              0 -> return QteOK
+              1 -> return QteUnknownPid
+              2 -> return QteBadFormat
+              3 -> get >>= return . QteOther
+              4 -> return QtePleaseSendBody
+              5 -> return QteBadNetworkMagic
+              6 -> get >>= return . QteNetworkError
+              7 -> get >>= return . QteEncodingError
+              8 -> return QteDispositionFailed
+              9 -> return QteLoggingError
+              10 -> return QteConnectionTimeout
+              11 -> return QteUnknownCommand
+              12 -> get >>= return . QteThrottle
 
 
 ----------------------------------------------
@@ -530,15 +603,18 @@ initNode cfg lookup =
                   theNewHostName <- evaluate newHostName
                   finalizer <- newEmptyMVar
                   finalized <- newEmptyMVar
+                  outgoing <- newQSem (cfgMaxOutgoing cfg)
                   mvar <- newMVar Node {ndHostName=theNewHostName, 
                                         ndProcessTable=Map.empty,
                                         ndAdminProcessTable=Map.empty,
                                         ndConfig=cfg,
                                         ndLookup=lookup,
                                         ndListenPort=0,
+                                        ndNextProcessId=0,
                                         ndNodeFinalizer=finalizer,
                                         ndNodeFinalized=finalized,
-                                        ndLogConfig=defaultLogConfig}
+                                        ndLogConfig=defaultLogConfig,
+                                        ndOutgoing=outgoing}
                   return mvar
 
 -- | Given a Node (created by 'initNode'), start execution of user-provided code
@@ -583,23 +659,27 @@ spawnLocal fun = do p <- getProcess
 runLocalProcess :: MVar Node -> ProcessM () -> IO ProcessId
 runLocalProcess node fun = 
          do 
-             localprocessid <- newLocalProcessId
+             localprocessid <- modifyMVar node (\thenode -> return $ (thenode {ndNextProcessId=1+ndNextProcessId thenode},
+                                                                               ndNextProcessId thenode))
              channel <- newTChanIO
              passProcess <- newEmptyMVar
              okay <- newEmptyMVar
              thread <- forkIO (runner okay node passProcess)
              thenodeid <- getNodeId node
-             pid <- evaluate $ ProcessId thenodeid localprocessid
+             let pid = thenodeid `seq` ProcessId thenodeid localprocessid
              state <- newTVarIO $ ProcessState {prQueue = queueMake}
-             putMVar passProcess (mkProcess channel node localprocessid thread pid state)
+             pool <- newIORef Map.empty
+             putMVar passProcess (mkProcess channel node localprocessid thread pid state pool)
              takeMVar okay
              return pid
          where
           notifyProcessDown p r = do nid <- getNodeId node
                                      let pp = adminGetPid nid ServiceProcessMonitor
                                      let msg = GlProcessDown (prPid p) r
-                                     try $ sendBasic node pp (msg) (Nothing::Maybe ()) PldAdmin :: IO (Either SomeException TransmitStatus)--ignore result ok
+                                     try $ sendBasic node pp (msg) (Nothing::Maybe ()) PldAdmin Nothing :: IO (Either SomeException TransmitStatus)--ignore result ok
           notifyProcessUp p = return ()
+          closePool p = do c <- readIORef (prPool p)
+                           mapM hClose (Map.elems c)
           exceptionHandler e p = let shown = show e in
                 notifyProcessDown (p) (SrException shown) >>
                  (try (logI node  (prPid p) "SYS" LoCritical (concat ["Process got unhandled exception ",shown]))::IO(Either SomeException ())) >> return () --ignore error
@@ -608,12 +688,12 @@ runLocalProcess node fun =
                     res <- try (fun `catch` (\ProcessTerminationException -> return ()))
                     case res of
                       Left e -> exceptionHandler (e::SomeException) p
-                      Right a -> notifyProcessDown (p) SrNormal >> return a
+                      Right a -> notifyProcessDown (p) SrNormal >> closePool p >> return a
           runner okay node passProcess = do
                   p <- takeMVar passProcess
                   let init = do death <- newEmptyMVar
                                 death2 <- newTVarIO False
-                                let pte = (mkProcessTableEntry (prChannel p) (prThread p) death death2)
+                                let pte = (mkProcessTableEntry (prChannel p) (prThread p) death death2 )
                                 insertProcessTableEntry node (prSelf p) pte
                                 return pte
                   let action = runProcessM fun p
@@ -633,7 +713,7 @@ runLocalProcess node fun =
                   pteDeathT = death2,
                   pteDaemonic = False
                 }
-          mkProcess channel noderef localprocessid thread pid state =
+          mkProcess channel noderef localprocessid thread pid state pool =
              Process
                 {
                   prPid = pid,
@@ -642,6 +722,7 @@ runLocalProcess node fun =
                   prNodeRef = noderef,
                   prThread = thread,
                   prState = state,
+                  prPool = pool,
                   prLogConfig = Nothing
                 }
 
@@ -694,7 +775,8 @@ roundtripQuery pld pid dat =
     do res <- ptry $ withMonitor apid $ roundtripQueryImpl 0 pld pid dat id []
        case res of
          Left (ServiceException s) -> return $ Left $ QteOther s
-         Right a -> return a
+         Right (Left a) -> return (Left a)
+         Right (Right a) -> return (Right a)
   where apid = case pld of
                    PldAdmin -> generalPid pid
                    _ -> pid
@@ -706,31 +788,37 @@ roundtripQueryUnsafe pld pid dat =
 
 roundtripQueryImpl :: (Serializable a, Serializable b) => Int -> PayloadDisposition -> ProcessId -> a -> (b -> c) -> [MatchM (Either TransmitStatus c) ()] -> ProcessM (Either TransmitStatus c)
 roundtripQueryImpl time pld pid dat converter additional =
-    do convId <- liftIO $ newConversationId
-       sender <- getSelfPid
-       res <- mysend pid dat (Just RoundtripHeader {msgheaderConversationId = convId,msgheaderSender = sender,msgheaderDestination = pid}) pld
-       case res of
-            QteOK -> receiver $ [matchCore (\(_,h) -> case h of
-                                                            Just a -> msgheaderConversationId a == convId && msgheaderSender a == pid
-                                                            Nothing -> False) (return . Right . converter . fst),
+    do mmatcher <- roundtripQueryImplSub pld pid dat (\_ y -> (return . Right . converter) y)
+       case mmatcher of
+            Left err -> return $ Left err
+            Right matcher ->
+                     receiver $ [ matcher (),
                                   matchProcessDown pid ((return . Left . QteNetworkError) "Remote partner unavailable"),
                                   matchProcessDown (generalPid pid) ((return . Left . QteNetworkError) "Remote partner unavailable")]
                                    ++ additional
-            err -> return (Left err)
    where 
-         mysend p d mh pld = case time of
-                              0 -> sendTry p d mh pld
-                              n -> do res <- ptimeout n $ sendTry p d mh pld
-                                      case res of
-                                        Nothing -> return QteConnectionTimeout
-                                        Just other -> return other
          receiver matchers = 
                      case time of
-                        0 -> receiveWait matchers
+                        0 -> do receiveWait matchers
                         n -> do res <- receiveTimeout n matchers
                                 case res of
                                    Nothing -> return (Left QteConnectionTimeout)
                                    Just a -> return a
+
+roundtripQueryImplSub :: (Serializable a, Serializable b) => PayloadDisposition -> ProcessId -> a -> (c -> b -> ProcessM q) -> ProcessM (Either TransmitStatus (c -> MatchM q ()))
+roundtripQueryImplSub pld pid dat act =
+    do convId <- liftIO $ newConversationId
+       sender <- getSelfPid
+       res <- mysend pid dat (Just RoundtripHeader {msgheaderConversationId = convId,msgheaderSender = sender,msgheaderDestination = pid}) pld
+       case res of
+            QteOK -> return $ Right $ \c -> (matchCore (\(_,h) -> 
+              case h of
+                 Just a -> msgheaderConversationId a == convId && msgheaderSender a == pid
+                 Nothing -> False) (\(x,_) -> do vv <- act c x
+                                                 return $ vv))
+            err -> return (Left err)
+   where 
+         mysend p d mh pld = sendTry p d mh pld
 
 roundtripResponse :: (Serializable a, Serializable b) => (a -> ProcessM (b,q)) -> MatchM q ()
 roundtripResponse f = roundtripResponseAsync myf False
@@ -787,17 +875,35 @@ sendSimple pid dat pld = sendTry pid dat (Nothing :: Maybe ()) pld
 sendTry :: (Serializable a,Serializable b) => ProcessId -> a -> Maybe b -> PayloadDisposition -> ProcessM TransmitStatus
 sendTry pid msg msghdr pld = getProcess >>= (\p -> 
        let
+          timeoutFilter a =
+             do cfg <- getConfig
+-- TODO This is problematic. We should give up on transmitting after a certain period
+-- of time if the remote host is just not responsive, but delays in message delivery,
+-- even to legitimate peers, are unpredictable. Timeouts are currently disabled
+-- but should be enabled if I can think of a good way to set them. This would
+-- also be a good place to put automatic retries or to limit the number
+-- of outgoing connections per node. //!!
+                q <- case 0 of -- case cfgRoundtripTimeout cfg of 
+                   0 -> a
+                   n -> do ff <- ptimeout n $ a
+                           case ff of
+                              Nothing -> return QteConnectionTimeout
+                              Just r -> return r
+                case q of
+                   QteThrottle n -> liftIO (threadDelay n) >> timeoutFilter a
+                   n -> return n
           tryAction = ptry action >>=
                     (\x -> case x of
                               Left l -> return $ QteEncodingError $ show (l::ErrorCall) -- catch errors from encoding
                               Right r -> return r)
                where action = 
                       do p <- getProcess
-                         liftIO $ sendBasic (prNodeRef p) pid msg msghdr pld
+                         timeoutFilter $ liftIO $ sendBasic (prNodeRef p) pid msg msghdr pld (Just $ prPool p)
+
        in tryAction )      
 
-sendBasic :: (Serializable a,Serializable b) => MVar Node -> ProcessId -> a -> Maybe b -> PayloadDisposition -> IO TransmitStatus
-sendBasic mnode pid msg msghdr pld = do
+sendBasic :: (Serializable a,Serializable b) => MVar Node -> ProcessId -> a -> Maybe b -> PayloadDisposition -> Maybe (IORef (Map.Map NodeId Handle)) -> IO TransmitStatus
+sendBasic mnode pid msg msghdr pld pool = do
               nid <- getNodeId mnode
               encoding <- liftIO $ serialEncode msg
               header <- maybe (return Nothing) (\x -> do t <- liftIO $ serialEncode x
@@ -805,35 +911,65 @@ sendBasic mnode pid msg msghdr pld = do
               let themsg = Message {msgDisposition=pld,msgHeader = header,msgPayload=encoding}
                        -- TODO allow an alternate, nonserialized format of message (using Dynamic) for local transmissions
               let islocal = nodeFromPid pid == nid
-              (if islocal then sendRawLocal else sendRawRemote) mnode pid nid themsg
+              (if islocal then sendRawLocal else sendRawRemote) mnode pid nid themsg pool
 
-sendRawLocal :: MVar Node -> ProcessId -> NodeId -> Message -> IO TransmitStatus
-sendRawLocal noderef thepid nodeid msg
+sendRawLocal :: MVar Node -> ProcessId -> NodeId -> Message -> Maybe (IORef (Map.Map NodeId Handle)) -> IO TransmitStatus
+sendRawLocal noderef thepid nodeid msg _
      | thepid == nullPid = return QteUnknownPid
      | otherwise = do cfg <- getConfigI noderef
                       messageHandler cfg noderef (msgDisposition msg) msg (cfgNetworkMagic cfg) (localFromPid thepid)
+
+sendRawRemote :: MVar Node -> ProcessId -> NodeId -> Message -> Maybe (IORef (Map.Map NodeId Handle)) -> IO TransmitStatus
+sendRawRemote noderef thepid nodeid msg (Just pool) =
+    do apool <- readIORef pool
+       ppool <- if Map.size apool > 10 -- trim pool
+                   then mapM hClose (Map.elems apool) >> return Map.empty
+                   else return apool
+       let finded = (Map.lookup thenode ppool) 
+       (ret,h) <- sendRawRemoteImpl noderef thepid nodeid msg finded
+       case ret of
+         QteOK -> cleanup h ppool
+         _ -> case finded of
+                Nothing -> cleanup h ppool
+                _ -> do (ret2,newh) <- sendRawRemoteImpl noderef thepid nodeid msg Nothing
+                        cleanup newh ppool
+       return ret
+  where
+      thenode = (nodeFromPid thepid)
+      cleanup h ppool =        
+       case h of
+         Just hh -> writeIORef pool (Map.insert thenode hh ppool)
+         Nothing -> writeIORef pool (Map.delete thenode ppool)
+sendRawRemote noderef thepid nodeid msg Nothing = 
+        liftM fst $ sendRawRemoteImpl noderef thepid nodeid msg Nothing
+
                   
-sendRawRemote :: MVar Node -> ProcessId -> NodeId -> Message -> IO TransmitStatus
-sendRawRemote noderef thepid@(ProcessId (NodeId hostname portid) localpid) nodeid msg
-     | thepid == nullPid = return QteUnknownPid
+sendRawRemoteImpl :: MVar Node -> ProcessId -> NodeId -> Message -> Maybe Handle -> IO (TransmitStatus,Maybe Handle)
+sendRawRemoteImpl noderef thepid@(ProcessId (NodeId hostname portid) localpid) nodeid msg bigh
+     | thepid == nullPid = return (QteUnknownPid,Nothing)
      | otherwise = 
-         do res <- try setup 
+         do node <- readMVar noderef
+            res <- withSem (ndOutgoing node) (try setup)
             case res of
                Right n -> return n
-               Left l | isEOFError l -> return $ QteNetworkError (show l)
-                      | isUserError l -> return QteBadFormat
-                      | isDoesNotExistError l -> return $ QteNetworkError (show l)
-                      | otherwise -> return $ QteOther $ show l
+               Left l | isEOFError l -> return (QteNetworkError (show l),Nothing)
+                      | isUserError l -> return (QteBadFormat,Nothing)
+                      | isDoesNotExistError l -> return (QteNetworkError (show l),Nothing)
+                      | otherwise -> return (QteOther $ show l,Nothing)
     where setup = bracket 
                  (acquireConnection)
-                 (hClose)
+                 (\_ -> return ())
                  (sender)
           acquireConnection = 
-              do h <- connectTo hostname (PortNumber $ toEnum portid)
-                 hSetBuffering h (BlockBuffering Nothing)
-                 return h
+               case bigh of
+                   Nothing ->
+                      do h <- connectTo hostname (PortNumber $ toEnum portid)
+                         hSetBuffering h (BlockBuffering Nothing)
+                         return h
+                   Just h -> return h
           sender h = do cfg <- getConfigI noderef
-                        writeMessage h (cfgNetworkMagic cfg,localpid,nodeid,msg)
+                        ret <- writeMessage h (cfgNetworkMagic cfg,localpid,nodeid,msg)
+                        return (ret,Just h)
     
 writeMessage :: Handle -> (String,LocalProcessId,NodeId,Message)-> IO TransmitStatus
 writeMessage h (magic,dest,nodeid,msg) = 
@@ -913,51 +1049,44 @@ listenAndDeliver :: MVar Node -> Config -> MVar (Maybe IOError) -> IO ()
 listenAndDeliver node cfg coord = 
 -- this listenon should be replaced with a lower-level listen call that binds
 -- to the interface corresponding to the name specified in cfgNodeName
-          do tryout <- try (listenOn whichPort) :: IO (Either IOError Socket) 
-             case tryout of
-                  Left e -> putMVar coord (Just e)
-                  Right sock -> bracket (
-                      do
-                        setSocketOption sock KeepAlive 1
-                        realPort <- socketPort sock
-                        modifyMVar_ node (\a -> return $ a {ndListenPort=fromEnum realPort}) 
-                        putMVar coord Nothing
-                        return sock)
-                     (sClose)
-                     (handleConnection)
+  do res <- try $ bracket (setupSocket) (sClose) (\s -> finishStartup >> sockBody s)
+     case res of
+       Left e -> putMVar coord (Just e)
+       Right _ -> return ()
    where  
+         finishStartup = putMVar coord Nothing
+         setupSocket =            
+               do sock <- listenOn whichPort
+                  setSocketOption sock KeepAlive 1
+                  realPort <- socketPort sock
+                  modifyMVar_ node (\a -> return $ a {ndListenPort=fromEnum realPort}) 
+                  return sock
          whichPort = if cfgListenPort cfg /= 0
                         then PortNumber $ toEnum $ cfgListenPort cfg
                         else PortNumber aNY_PORT
-         handleCommSafe h ho po = 
-            try (handleComm h ho po) >>= (\x -> case x of
-              Left l -> case l of
-                           n | isUserError n -> writeResultTry h QteBadFormat
-                             | otherwise -> logNetworkError n
-              Right False -> return ()
-              Right True -> handleCommSafe h ho po)
+         handleCommSafe h = 
+            (try $ handleComm h :: IO (Either IOError ())) >> return ()
          logNetworkError :: IOError -> IO ()
          logNetworkError n = return ()
          writeResultTry h q =
             do res <- try (writeResult h q)
                case res of
-                  Left n -> logNetworkError n >> return ()
+                  Left n -> logNetworkError n
                   Right q -> return ()
-         cleanBody n = reverse $ dropWhile isSpace (reverse (dropWhile isSpace n))
-         handleComm h hostname portn = 
+         handleComm h = 
             do (magic,adestp,nodeid,msg) <- readMessage h
                res <- messageHandler cfg node (msgDisposition msg) msg magic adestp
                writeResult h res
                case res of
-                 QteOK -> return True
-                 _ -> return False
-
-         handleConnection sock = 
-            do
-               (h,hostname,portn) <- accept sock
-               hSetBuffering h (BlockBuffering Nothing)
-               _ <- forkIO (handleCommSafe h hostname portn `finally` hClose h)
-               handleConnection sock
+                 QteOK -> handleComm h
+                 _ -> return ()
+         sockBody s =
+              do hchan <- newChan
+                 forkIO $ forever $ do h <- readChan hchan
+                                       hSetBuffering h (BlockBuffering Nothing)
+                                       forkIO $ (handleCommSafe h `finally` hClose h)
+                 forever $ do (newh,_,_) <- accept s
+                              writeChan hchan newh
 
 
 messageHandler :: Config -> MVar Node -> PayloadDisposition -> Message -> String -> LocalProcessId -> IO TransmitStatus
@@ -1010,10 +1139,6 @@ waitForThreads mnode = do node <- takeMVar mnode
 
 paddedString :: Int -> String -> String
 paddedString i s = s ++ (replicate (i-length s) ' ')
-
-newLocalProcessId :: IO LocalProcessId
-newLocalProcessId = do d <- newUnique
-                       return $ hashUnique d
 
 newConversationId :: IO Int
 newConversationId = do d <- newUnique
@@ -1102,6 +1227,9 @@ makeNodeFromHost = NodeId
 localFromPid :: ProcessId -> LocalProcessId
 localFromPid (ProcessId _ lid) = lid
 
+hostFromNid :: NodeId -> HostName
+hostFromNid (NodeId hn p) = hn
+
 buildPidFromNodeId :: NodeId -> LocalProcessId -> ProcessId
 buildPidFromNodeId n lp = ProcessId n lp
 
@@ -1127,6 +1255,7 @@ suppressTransmitException a =
           Left (TransmitException _) -> return Nothing
           Right a -> return $ Just a
 
+-- | A 'ProcessM'-flavoured variant of 'Control.Exception.try'
 ptry :: (Exception e) => ProcessM a -> ProcessM (Either e a)
 ptry f = do p <- getProcess
             res <- liftIO $ try (runProcessM f p)
@@ -1134,10 +1263,12 @@ ptry f = do p <- getProcess
               Left e -> return $ Left e
               Right (newp,newanswer) -> ProcessM (\_ -> return (newp,Right newanswer))
 
+-- | A 'ProcessM'-flavoured variant of 'Control.Exception.catch'
 pcatch :: Exception e => ProcessM a -> (e -> ProcessM a) -> ProcessM a
 pcatch code handler = do p <- getProcess
                          liftIO $ catch (liftM snd $ runProcessM code p) (\e -> liftM snd $ runProcessM (handler e) p)
                          
+-- | A 'ProcessM'-flavoured variant of 'System.Timeout.timeout'
 ptimeout :: Int -> ProcessM a -> ProcessM (Maybe a)
 ptimeout t f = do p <- getProcess
                   res <- liftIO $ System.Timeout.timeout t (runProcessM f p)
@@ -1145,6 +1276,7 @@ ptimeout t f = do p <- getProcess
                     Nothing -> return Nothing
                     Just (newp,newanswer) -> ProcessM (\_ -> return (newp,Just newanswer))
 
+-- | A 'ProcessM'-flavoured variant of 'Control.Exception.bracket'
 pbracket :: (ProcessM a) -> (a -> ProcessM b) -> (a -> ProcessM c) -> ProcessM c
 pbracket before after fun = 
        do p <- getProcess
@@ -1154,6 +1286,7 @@ pbracket before after fun =
                          (\(newp,newanswer) -> runProcessM (fun newanswer) newp)
           ProcessM (\_ -> return (newp2, newanswer2))   
 
+-- | A 'ProcessM'-flavoured variant of 'Control.Exception.finally'
 pfinally :: ProcessM a -> ProcessM b -> ProcessM a
 pfinally fun after = pbracket (return ()) (\_ -> after) (const fun)
 
@@ -1171,7 +1304,8 @@ emptyConfig = Config {
                   cfgLocalRegistryListenPort = 38813,
                   cfgNetworkMagic = "MAGIC",
                   cfgKnownHosts = [],
-                  cfgRoundtripTimeout = 5000000,
+                  cfgRoundtripTimeout = 10000000,
+                  cfgMaxOutgoing = 50,
                   cfgPromiseFlushDelay = 5000000,
                   cfgPromisePrefix = "rpromise-",
                   cfgArgs = []
@@ -1232,6 +1366,7 @@ processConfig rawLines from = foldl processLine from rawLines
   updateCfg cfg "cfgPeerDiscoveryPort" p = cfg {cfgPeerDiscoveryPort=(read.isInt) p}
   updateCfg cfg "cfgRoundtripTimeout" p = cfg {cfgRoundtripTimeout=(read.isInt) p}
   updateCfg cfg "cfgPromiseFlushDelay" p = cfg {cfgPromiseFlushDelay=(read.isInt) p}
+  updateCfg cfg "cfgMaxOutgoing" p = cfg {cfgMaxOutgoing=(read.isInt) p}
   updateCfg cfg "cfgPromisePrefix" p = cfg {cfgPromisePrefix=p}
   updateCfg cfg "cfgLocalRegistryListenPort" p = cfg {cfgLocalRegistryListenPort=(read.isInt) p}
   updateCfg cfg "cfgKnownHosts" m = cfg {cfgKnownHosts=words m}
@@ -1253,7 +1388,7 @@ data LogLevel = LoSay -- ^ Non-suppressible application-level emission
               | LoFatal
               | LoCritical 
               | LoImportant
-              | LoStandard
+              | LoStandard -- ^ The default log level
               | LoInformation
               | LoTrivial 
                 deriving (Eq,Ord,Enum,Show)
@@ -1263,16 +1398,20 @@ instance Binary LogLevel where
    get = get >>= return . toEnum
 
 -- | Specifies the subsystem or region that is responsible for
--- generating a given log entry. Most framework subsystems
--- use a LogSphere of SYS; the 'say' function generates
--- output from SAY. The remainder of values are free for
--- use at the application level.
+-- generating a given log entry. This is useful in conjunction
+-- with 'LogFilter' to limit displayed log output to the
+-- particular area of your program that you are currently debugging.
+-- The SYS, TSK, and SAY spheres are used by the framework
+-- for messages relating to the Process layer, the Task layer,
+-- and the 'say' function.
+-- The remainder of values are free for use at the application level.
 type LogSphere = String
 
-data LogTarget = LtStdout 
-               | LtForward NodeId 
-               | LtFile FilePath 
-               | LtForwarded  -- special value -- don't set this in your logconfig!
+-- | A preference as to what is done with log messages
+data LogTarget = LtStdout -- ^ Messages will be output to the console; the default
+               | LtForward NodeId  -- ^ Log messages will be forwarded to the given node; please don't set up a loop
+               | LtFile FilePath -- ^ Log messages will be appended to the given file
+               | LtForwarded  -- ^ Special value -- don't set this in your LogConfig!
                deriving (Typeable)
 
 instance Binary LogTarget where
@@ -1287,6 +1426,11 @@ instance Binary LogTarget where
                 2 -> get >>= return . LtFile
                 3 -> return LtForwarded
 
+-- | Specifies which log messages will be output. 
+-- All log messages of importance below the current
+-- log level or not among the criterea given here
+-- will be suppressed. This type lets you limit
+-- displayed log messages to certain components.
 data LogFilter = LfAll
                | LfOnly [LogSphere]
                | LfExclude [LogSphere] deriving (Typeable)
@@ -1301,11 +1445,20 @@ instance Binary LogFilter where
                   1 -> get >>= return . LfOnly
                   2 -> get >>= return . LfExclude
 
+-- | Expresses a current configuration of the logging
+-- subsystem, which determines which log messages to 
+-- be output and where to send them when they are.
+-- Both processes and nodes have log configurations,
+-- set with 'setLogConfig' and 'setNodeLogConfig'
+-- respectively. The node log configuration is
+-- used for all processes that have not explicitly
+-- set their log configuration. Otherwise, the
+-- process log configuration takes priority.
 data LogConfig = LogConfig
      {
-       logLevel :: LogLevel,
-       logTarget :: LogTarget,
-       logFilter :: LogFilter
+       logLevel :: LogLevel, -- ^ The lowest message priority that will be displayed
+       logTarget :: LogTarget, -- ^ Where to send messages
+       logFilter :: LogFilter -- ^ Other filtering
      } deriving (Typeable)
 
 instance Binary LogConfig where
@@ -1358,7 +1511,13 @@ showLogMessage (LogMessage utc ll ls s pid _) =
                        (show $ fromEnum ll)," ",
                        paddedString 28 (show pid)," ",ls," ",s]
 
-
+-- | The default log configuration represents
+-- a starting point for setting your own
+-- configuration. It is:
+--
+-- > logLevel = LoStandard
+-- > logTarget = LtStdout
+-- > logFilter = LfAll
 defaultLogConfig :: LogConfig
 defaultLogConfig = LogConfig
                    {
@@ -1380,6 +1539,10 @@ logApplyFilter cfg sph lev = filterSphere (logFilter cfg)
 say :: String -> ProcessM ()
 say v = logS "SAY" LoSay v
 
+-- | Gets the currently active log configuration
+-- for the current process; if the current process
+-- doesn't have a log configuration set, the process's
+-- log configuration will be returned
 getLogConfig :: ProcessM LogConfig
 getLogConfig = do p <- getProcess
                   case (prLogConfig p) of
@@ -1387,14 +1550,19 @@ getLogConfig = do p <- getProcess
                     Nothing -> do node <- liftIO $ readMVar (prNodeRef p)
                                   return (ndLogConfig node)
 
+-- | Set the process's log configuration. This overrides
+-- any node-level log configuration
 setLogConfig :: LogConfig -> ProcessM ()
 setLogConfig lc = do p <- getProcess
                      putProcess (p {prLogConfig = Just lc})
 
+-- | Sets the node's log configuration
 setNodeLogConfig :: LogConfig -> ProcessM ()
 setNodeLogConfig lc = do p <- getProcess
                          liftIO $ modifyMVar_ (prNodeRef p) (\x -> return $ x {ndLogConfig = lc})
 
+-- | Sets the log configuration of a remote node.
+-- May throw TransmitException
 setRemoteNodeLogConfig :: NodeId -> LogConfig -> ProcessM ()
 setRemoteNodeLogConfig nid lc = do res <- sendSimple (adminGetPid nid ServiceLog) (LogUpdateConfig lc) PldAdmin
                                    case res of 
@@ -1411,7 +1579,7 @@ logI mnode pid sph ll txt = do node <- readMVar mnode
                sendMsg cfg = do msg <- makeMsg cfg
                                 res <- let svc = (adminGetPid nid ServiceLog)
                                            nid = nodeFromPid pid 
-                                       in sendBasic mnode svc msg (Nothing::Maybe()) PldAdmin
+                                       in sendBasic mnode svc msg (Nothing::Maybe()) PldAdmin Nothing
                                 case res of
                                     _ -> return () -- ignore error -- what can I do?
                                 
@@ -1471,17 +1639,30 @@ startLoggingService = serviceThread ServiceLog logger
 data NodeMonitorCommand = 
            NodeMonitorStart NodeId
          | NodeMonitorPing
-           deriving (Typeable,Data)
-instance Binary NodeMonitorCommand where put=genericPut;get=genericGet
+           deriving (Typeable)
+instance Binary NodeMonitorCommand where 
+  put (NodeMonitorStart nid) = putWord8 0 >> put nid
+  put (NodeMonitorPing) = putWord8 1
+  get = do a <- getWord8
+           case a of
+              0 -> do b <- get
+                      return $ NodeMonitorStart b
+              1 -> return NodeMonitorPing
 
 data NodeMonitorSignal = 
-         NodeMonitorNodeFailure NodeId deriving (Typeable,Data)
-instance Binary NodeMonitorSignal where put=genericPut;get=genericGet
+         NodeMonitorNodeFailure NodeId deriving (Typeable)
+instance Binary NodeMonitorSignal where 
+   put (NodeMonitorNodeFailure nid) = put nid
+   get = do a <- get
+            return $ NodeMonitorNodeFailure a
 
 data NodeMonitorInformation = 
            NodeMonitorNodeDown NodeId
-           deriving (Typeable,Data)
-instance Binary NodeMonitorInformation where put=genericPut;get=genericGet
+           deriving (Typeable)
+instance Binary NodeMonitorInformation where 
+   put (NodeMonitorNodeDown nid) = put nid
+   get = do a <- get
+            return $ NodeMonitorNodeDown a
 
 monitorNode :: NodeId -> ProcessM ()
 monitorNode nid = do 
@@ -1627,23 +1808,54 @@ serviceThread v f = spawnLocalAnd (pbracket (return ())
 ----------------------------------------------
 
 data GlSignal = GlProcessDown ProcessId SignalReason
-              | GlNodeDown NodeId deriving (Typeable,Data,Show)
+              | GlNodeDown NodeId deriving (Typeable,Show)
 instance Binary GlSignal where
-   put = genericPut
-   get = genericGet
+   put (GlProcessDown a b) = putWord8 0 >> put a >> put b
+   put (GlNodeDown a) = putWord8 1 >> put a
+   get = do ch <- getWord8
+            case ch of
+              0 -> do a <- get
+                      b <- get
+                      return $ GlProcessDown a b
+              1 -> do a <- get
+                      return $ GlNodeDown a
 
 data GlSynchronous = GlRequestMonitoring ProcessId ProcessId MonitorAction
                    | GlRequestMoniteeing ProcessId NodeId 
-                   | GlRequestUnmonitoring ProcessId ProcessId MonitorAction deriving (Typeable, Data)
+                   | GlRequestUnmonitoring ProcessId ProcessId MonitorAction deriving (Typeable)
 instance Binary GlSynchronous where
-   put = genericPut
-   get = genericGet
+     put (GlRequestMonitoring a b c) = putWord8 0 >> put a >> put b >> put c
+     put (GlRequestMoniteeing a b) = putWord8 1 >> put a >> put b
+     put (GlRequestUnmonitoring a b c) = putWord8 2 >> put a >> put b >> put c
+     get = do ch <- getWord8
+              case ch of
+                 0 -> do a <- get
+                         b <- get
+                         c <- get
+                         return $  GlRequestMonitoring a b c
+                 1 -> do a <- get
+                         b <- get
+                         return $ GlRequestMoniteeing a b
+                 2 -> do a <- get
+                         b <- get
+                         c <- get
+                         return $  GlRequestUnmonitoring a b c
 
 data GlCommand = GlMonitor ProcessId ProcessId MonitorAction
-               | GlUnmonitor ProcessId ProcessId MonitorAction deriving (Typeable,Data)
+               | GlUnmonitor ProcessId ProcessId MonitorAction deriving (Typeable)
 instance Binary GlCommand where
-   put = genericPut
-   get = genericGet
+   put (GlMonitor a b c) = putWord8 0 >> put a >> put b >> put c
+   put (GlUnmonitor a b c) = putWord8 1 >> put a >> put b >> put c
+   get = do ch <- getWord8
+            case ch of
+               0 -> do a <- get
+                       b <- get
+                       c <- get
+                       return $ GlMonitor a b c
+               1 -> do a <- get
+                       b <- get
+                       c <- get
+                       return $ GlUnmonitor a b c
 
 -- | The different kinds of monitoring available between processes.
 data MonitorAction = MaMonitor -- ^ MaMonitor means that the monitor process will be sent a ProcessDownException message when the monitee terminates for any reason.
@@ -1651,7 +1863,7 @@ data MonitorAction = MaMonitor -- ^ MaMonitor means that the monitor process wil
 
                    | MaLinkError -- ^ MaLinkError means that the monitor process will receive an asynchronous exception of type ProcessDownException when the monitee terminates abnormally
 
-                   deriving (Typeable,Show,Ord,Eq,Data) --TODO remove Data
+                   deriving (Typeable,Show,Ord,Eq)
 instance Binary MonitorAction where 
   put MaMonitor = putWord8 0
   put MaLink = putWord8 1
@@ -1667,7 +1879,7 @@ data SignalReason = SrNormal  -- ^ the monitee terminated normally
                   | SrException String -- ^ the monitee terminated with an uncaught exception, which is given as a string
                   | SrNoPing -- ^ the monitee is believed to have ended or be inaccessible, as the node on which its running is not responding to pings. This may indicate a network bisection or that the remote node has crashed.
                   | SrInvalid -- ^ SrInvalid: the monitee was not running at the time of the attempt to establish monitoring
-                    deriving (Typeable,Data,Show)
+                    deriving (Typeable,Show)
 instance Binary SignalReason where 
      put SrNormal = putWord8 0
      put (SrException s) = putWord8 1 >> put s
@@ -1687,7 +1899,9 @@ type GlLinks = Map.Map ProcessId
 
 data GlobalData = GlobalData
      {
-        glLinks :: GlLinks
+        glLinks :: GlLinks,
+        glNextId :: Integer,
+        glSyncs :: Map.Map Integer (GlobalData -> MatchM GlobalData ())
      }
 
 gdCombineEntry :: (Map.Map (LocalProcessId,MonitorAction) (Int),
@@ -1799,14 +2013,15 @@ matchProcessDown pid f = matchIf (\(ProcessMonitorException p _) -> p==pid) (con
 -- in the second parameter is running, a process down message will be sent to the current process,
 -- which can be handled by 'matchProcessDown'. 
 withMonitor :: ProcessId -> ProcessM a -> ProcessM a
-withMonitor pid f = withMonitoring pid MaMonitor f 
+withMonitor pid f = withMonitoring pid MaMonitor f
 
 withMonitoring :: ProcessId -> MonitorAction -> ProcessM a -> ProcessM a
 withMonitoring pid how f =  
                         do mypid <- getSelfPid
                            monitorProcess mypid pid how -- TODO if this throws a ServiceException, translate that into a trigger
-                           a <- f `pfinally` unmonitorProcess mypid pid how
+                           a <- f `pfinally` safety (unmonitorProcess mypid pid how)
                            return a
+              where safety n = ptry n :: ProcessM (Either ServiceException ()) 
 
 
 -- | Establishes unidirectional processing of another process. The format is:
@@ -1874,7 +2089,7 @@ triggerMonitor towho aboutwho how why =
 startProcessMonitorService :: ProcessM ()
 startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyGlobal)
   where 
-    emptyGlobal = GlobalData {glLinks=Map.empty}
+    emptyGlobal = GlobalData {glLinks=Map.empty, glNextId=0, glSyncs = Map.empty}
     getGlobalFor pid = adminGetPid (nodeFromPid pid) ServiceProcessMonitor
     checkliveness pid = do islocal <- isPidLocal pid
                            case islocal of
@@ -1919,6 +2134,10 @@ startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyG
                                   return $ glExpungeProcess global pid mynid
     service global = 
          let
+             additional = map (\receiver -> receiver global) (Map.elems (glSyncs global))
+             matchPatterns = [match matchSignals,
+                          roundtripResponseAsync matchCommands False,
+                          roundtripResponse (matchSyncs global)] ++ additional
              matchSignals cmd = 
                 case cmd of
                   GlProcessDown pid why -> 
@@ -1944,19 +2163,7 @@ startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyG
                   GlRequestUnmonitoring monitee monitor action ->
                        let s1 = removeLocalMonitor global monitor monitee action
                         in return (QteOK,s1)
-             roundtripQuerySimul pld pid dat global = 
-                 let
-                     ms = roundtripResponse (\x -> do a <- matchSyncs global x
-                                                      case a of
-                                                        (ret,newg) -> return (ret,Right $ Left newg))
-                 in
-                 do cfg <- getConfig
-                    res <- roundtripQueryImpl (cfgRoundtripTimeout cfg) pld pid dat Right [ms]
-                    case res of
-                      Left a -> return (global,Left a)
-                      Right (Left g) -> roundtripQuerySimul pld pid dat g
-                      Right (Right v) -> return (global,Right v)
-             matchCommands cmd = 
+             matchCommands cmd ans = 
                 case cmd of
                   GlMonitor monitor monitee action -> 
                     do ismoniteelocal <- isPidLocal monitee
@@ -1966,68 +2173,89 @@ startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyG
                                            case live of
                                               True -> let s1 = addLocalMonitee global monitor monitee action
                                                           s2 = addLocalMonitor s1 monitor monitee action
-                                                       in return (QteOK,s2)
-                                              False -> return (QteOK,global)
+                                                       in ans QteOK >> return s2
+                                              False -> ans QteOK >> return global
                          (True,False) -> do live <- checklivenessandtrigger monitor monitee action
                                             case live of
+                                              False -> ans QteOK >> return global
                                               True -> let msg = GlRequestMonitoring monitee monitor action
-                                                       in do (newglobal,sync) <- roundtripQuerySimul PldAdmin (getGlobalFor monitor) msg global
-                                                             case sync of
-                                                               Left err -> return (err,newglobal)
-                                                               Right QteOK -> let s1 = addLocalNode newglobal monitor monitee action
-                                                                               in return (QteOK,s1)
-                                                               Right err -> return (err,newglobal)
-                                              False -> return (QteOK,global)
+                                                          receiver myId myGlobal myMsg =
+                                                             let newGlobal = myGlobal {glSyncs = Map.delete myId (glSyncs myGlobal)}
+                                                              in case myMsg of
+                                                                   QteOK -> let s1 = addLocalNode newGlobal monitor monitee action
+                                                                             in do ans QteOK
+                                                                                   return s1
+                                                                   err -> ans err >> return newGlobal
+                                                       in do mmatch <- roundtripQueryImplSub PldAdmin (getGlobalFor monitor) msg (receiver (glNextId global))
+                                                             case mmatch of
+                                                                Left err -> ans err >> return global
+                                                                Right mymatch -> return global {glNextId=glNextId global+1,
+                                                                                                glSyncs=Map.insert (glNextId global) (mymatch) (glSyncs global)}
                          (False,True) -> let msg = GlRequestMoniteeing monitee (nodeFromPid monitor)
-                                          in do (newglobal,sync) <- roundtripQuerySimul PldAdmin (getGlobalFor monitee) msg global
-                                                case sync of
-                                                   Left err -> return (err,newglobal)
-                                                   Right QteOK -> let s1 = addLocalMonitor newglobal monitor monitee action 
-                                                                   in do monitorNode (nodeFromPid monitee)
-                                                                         return (QteOK,s1)
-                                                   Right QteUnknownPid -> do trigger monitor monitee action SrInvalid
-                                                                             return (QteOK,newglobal)
-                                                   Right err -> return (err,newglobal)
-                         (False,False) -> return (QteOther "Requesting monitoring by third party node",global)
+                                             receiver myId myGlobal myMsg =
+                                               let newGlobal = myGlobal {glSyncs = Map.delete myId (glSyncs myGlobal)}
+                                                in case myMsg of
+                                                     QteOK -> let s1 = addLocalMonitor newGlobal monitor monitee action 
+                                                               in do monitorNode (nodeFromPid monitee)
+                                                                     ans QteOK
+                                                                     return s1 
+                                                     QteUnknownPid -> do trigger monitor monitee action SrInvalid
+                                                                         ans QteOK
+                                                                         return newGlobal
+                                                     err -> do ans err
+                                                               return newGlobal
+                                          in do mmatch <- roundtripQueryImplSub PldAdmin (getGlobalFor monitee) msg (receiver (glNextId global))
+                                                case mmatch of
+                                                   Left err -> ans err >> return global
+                                                   Right mymatch -> return global {glNextId=glNextId global+1,
+                                                                                   glSyncs=Map.insert (glNextId global) (mymatch) (glSyncs global)}
+                         (False,False) -> do ans (QteOther "Requesting monitoring by third party node")
+                                             return global
                   GlUnmonitor monitor monitee action -> 
                     do ismoniteelocal <- isPidLocal monitee
                        ismonitorlocal <- isPidLocal monitor
                        case (ismoniteelocal,ismonitorlocal) of
                          (True,True) -> let s1 = removeLocalMonitee global monitor monitee action 
                                             s2 = removeLocalMonitor s1 monitor monitee action
-                                         in return (QteOK,s2)
+                                         in ans QteOK >> return s2
                          (True,False) -> let msg = GlRequestUnmonitoring monitee monitor action
-                                          in do sync <- roundtripQueryUnsafe PldAdmin (getGlobalFor monitor) msg
+                                             receiver myId myGlobal myMsg =
+                                                let newGlobal = myGlobal {glSyncs=Map.delete myId (glSyncs myGlobal)}
+                                                 in ans myMsg >> return newGlobal
+
+                                          in do sync <- roundtripQueryImplSub PldAdmin (getGlobalFor monitee) msg (receiver (glNextId global))
                                                 case sync of
-                                                   Right QteOK -> return (QteOK,global)
-                                                   Left err -> return (err,global)
-                                                   Right err -> return (err,global)
+                                                   Left err -> ans err >> return global
+                                                   Right mymatch -> return global {glNextId=glNextId global+1,
+                                                                                   glSyncs=Map.insert (glNextId global) (mymatch) (glSyncs global)} 
                          (False,True) -> let s1 = removeLocalMonitor global monitor monitee action
-                                          in return (QteOK,s1)
-                         (False,False) -> return (QteOther "Requesting unmonitoring by third party node",global) 
-          in receiveWait [match matchSignals,
-                          roundtripResponse matchCommands,
-                          roundtripResponse (matchSyncs global)] >>= service
+                                          in ans QteOK >> return s1
+                         (False,False) -> ans (QteOther "Requesting unmonitoring by third party node") >> return global
+          in receiveWait matchPatterns >>= service
 
 data AmSpawn = AmSpawn (Closure (ProcessM ())) AmSpawnOptions deriving (Typeable)
 instance Binary AmSpawn where 
     put (AmSpawn c o) =put c >> put o
     get=get >>= \c -> get >>= \o -> return $ AmSpawn c o
-data AmCall = AmCall (Closure Payload) deriving (Typeable)
+data AmCall = AmCall ProcessId (Closure Payload) deriving (Typeable)
 instance Binary AmCall where
-    put (AmCall clo) = put clo
+    put (AmCall pid clo) = put pid >> put clo
     get = do c <- get
-             return $ AmCall c
+             d <- get
+             return $ AmCall c d
 
 data AmSpawnOptions = AmSpawnOptions 
         { 
           amsoPaused :: Bool,
           amsoLink :: Maybe ProcessId,
           amsoMonitor :: Maybe (ProcessId,MonitorAction)
-        } deriving (Data,Typeable) -- TODO remove Data
+        } deriving (Typeable) 
 instance Binary AmSpawnOptions where
-    put = genericPut
-    get = genericGet
+    put (AmSpawnOptions a b c) = put a >> put b >> put c
+    get = do a <- get
+             b <- get
+             c <- get
+             return $ AmSpawnOptions a b c
 
 defaultSpawnOptions :: AmSpawnOptions
 defaultSpawnOptions = AmSpawnOptions {amsoPaused=False, amsoLink=Nothing, amsoMonitor=Nothing}
@@ -2043,6 +2271,7 @@ instance Binary AmSpawnUnpause where
 spawn :: NodeId -> Closure (ProcessM ()) -> ProcessM ProcessId
 spawn node clo = spawnAnd node clo defaultSpawnOptions
 
+-- | Ends the current process in an orderly manner.
 terminate :: ProcessM a
 terminate = throw ProcessTerminationException
 
@@ -2067,6 +2296,9 @@ spawnAnd node clo opt =
          Left e -> throw $ TransmitException e
          Right pid -> return pid	
 
+-- | Invokes a function on a remote node. The function must be
+-- given by a closure. This function will block until the called
+-- function completes or the connection is broken.
 callRemote :: (Serializable a) => NodeId -> Closure (ProcessM a) -> ProcessM a
 callRemote node clo = callRemoteImpl node clo
 
@@ -2082,31 +2314,35 @@ callRemoteImpl node clo =
      in case newclo of
           Nothing -> throw $ TransmitException QteUnknownCommand
           Just plclo ->
-               do res <- roundtripQuery PldAdmin (adminGetPid node ServiceSpawner) (AmCall plclo)
+               do mypid <- getSelfPid
+                  res <- roundtripQuery PldAdmin (adminGetPid node ServiceSpawner) (AmCall mypid plclo)
                   case res of
                      Right (Just mval) -> 
                        do val <- liftIO $ serialDecode mval
                           case val of
                              Just a -> return a
                              _ -> throw $ TransmitException QteUnknownCommand
-                     Left e -> throw $ TransmitException e
+                     Left e -> throw (TransmitException e)
                      _ -> throw $ TransmitException QteUnknownCommand
 
 
 startSpawnerService :: ProcessM ()
 startSpawnerService = serviceThread ServiceSpawner spawner
    where spawner = receiveWait [matchSpawnRequest,matchCallRequest,matchUnknownThrow] >> spawner
-         callWorker c responder = do a <- invokeClosure c --TODO this needs exception trapping
+         exceptFilt :: SomeException -> q -> q
+         exceptFilt _ q = q
+         callWorker c responder = do a <- ptry $ invokeClosure c
                                      case a of
-                                        Nothing -> responder Nothing
-                                        Just pl -> responder (Just pl)
+                                        Left q -> exceptFilt q (responder Nothing)
+                                        Right Nothing -> responder Nothing
+                                        Right (Just pl) -> responder (Just pl)
          spawnWorker c = do a <- invokeClosure c
                             case a of
                                 Nothing -> (logS "SYS" LoCritical $ "Failed to invoke closure "++(show c)) --TODO it would be nice if this error could be propagated to the caller of spawnRemote, at the very least it should throw an exception so a linked process will be notified 
                                 Just q -> q
          matchCallRequest = roundtripResponseAsync 
                (\cmd sender -> case cmd of
-                    AmCall clo -> spawnLocal (callWorker clo sender) >> return ()) False
+                    AmCall pid clo -> spawnLocal (callWorker clo sender) >> return ()) False
          matchSpawnRequest = roundtripResponse 
                (\cmd -> case cmd of
                     AmSpawn c opt -> 
@@ -2140,6 +2376,10 @@ localRegistryMagicRole = "__LocalRegistry"
 
 type LocalProcessName = String
 
+-- | Created by 'Remote.Peer.getPeers', this maps
+-- each each role to a list of nodes that have that role.
+-- It can be examined directly or queried with
+-- 'findPeerByRole'.
 type PeerInfo = Map.Map String [NodeId]
 
 data LocalNodeData = LocalNodeData {ldmRoles :: PeerInfo} 
@@ -2186,6 +2426,11 @@ localRegistryPid =
         cfg <- getConfig
         return $ adminGetPid (NodeId hostname (cfgLocalRegistryListenPort cfg)) ServiceNodeRegistry
 
+-- | Every host on which a node is running also needs a node registry,
+-- which arbitrates those nodes can responds to peer queries. If
+-- no registry is running, one will be automatically started
+-- when the framework is started, but the registry can be started
+-- independently, also. This function does that.
 standaloneLocalRegistry :: String -> IO ()
 standaloneLocalRegistry cfgn = do cfg <- readConfig True (Just cfgn)
                                   res <- startLocalRegistry cfg True
@@ -2279,7 +2524,7 @@ startLocalRegistry cfg waitforever = startit
                                 else return (LocalNodeResponseOK,insert tbl magic role nid)
   registryCommand tbl (LocalNodeHello) = return (LocalNodeHello,tbl)
   registryCommand tbl _ = return (LocalNodeResponseError "Unknown command",tbl)
-  startit = do node <- initNode regConfig Remote.Call.empty
+  startit = do node <- initNode regConfig Remote.Reg.empty
                res <- try $ forkAndListenAndDeliver node regConfig :: IO (Either SomeException ())
                case res of
                   Left e -> return $ QteNetworkError $ show e
@@ -2342,6 +2587,15 @@ queueEmpty _ = False
 queueInsert :: Queue a -> a -> Queue a
 queueInsert (Queue incoming outgoing) a = Queue (a:incoming) outgoing
 
+queueInsertAndLimit :: Queue a -> Int -> a -> Queue a
+queueInsertAndLimit q limit a= 
+       let s1 = queueInsert q a
+           s2 = if queueLength s1 > limit
+                   then let (_,f) = queueRemove s1
+                         in f
+                   else s1
+        in s2
+
 queueInsertMulti :: Queue a -> [a] -> Queue a
 queueInsertMulti (Queue incoming outgoing) a = Queue (a++incoming) outgoing
 
@@ -2355,11 +2609,18 @@ queueToList (Queue incoming outgoing) = outgoing ++ reverse incoming
 queueFromList :: [a] -> Queue a
 queueFromList l = Queue [] l
 
+queueLength :: Queue a -> Int
+queueLength (Queue incoming outgoing) = length incoming + length outgoing -- should probably just store in the length in the structure
+
 queueEach :: Queue a -> [(a,Queue a)]
 queueEach q = case queueToList q of
                      [] -> []
                      a:rest -> each [] a rest
         where each before it []                     = [(it,queueFromList before)]
               each before it following@(next:after) = (it,queueFromList (before++following)):(each (before++[it]) next after)
+
+withSem :: QSem -> IO a -> IO a
+withSem sem f = action `finally` signalQSem sem
+   where action = waitQSem sem >> f
 
 

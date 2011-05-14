@@ -1,12 +1,8 @@
 {-# LANGUAGE TemplateHaskell,DeriveDataTypeable,BangPatterns #-}
 module Main where
 
-import Remote.Process
-import Remote.Encoding
-import Remote.Init
-import Remote.Call
-import Remote.Peer
-
+import Remote
+import Remote.Process (roundtripResponse,setRemoteNodeLogConfig,getConfig,PayloadDisposition(..),roundtripQuery,roundtripQueryMulti)
 import KMeansCommon
 
 import Control.Exception (try,SomeException,evaluate)

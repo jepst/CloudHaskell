@@ -1,10 +1,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 module Main where
 
-import Remote.Process
-import Remote.Task
-import Remote.Init
-import Remote.Call
+import Remote
 
 import Control.Monad.Trans
 import Control.Monad
@@ -19,7 +16,8 @@ type Word = String
 
 mrMapper :: Promise [Promise Vector] -> [Cluster] -> TaskM [(ClusterId, Promise Vector)]
 mrMapper ppoints clusters =
-   do points <- readPromise ppoints
+   do tsay "mapping"
+      points <- readPromise ppoints
       mapM (assign (map (\c -> (clId c,clusterCenter c)) clusters)) points
   where assign clusters point =
            let distances point = map (\(clid,center) -> (clid,sqDistance center point)) clusters
@@ -30,8 +28,10 @@ mrMapper ppoints clusters =
 
 mrReducer :: ClusterId -> [Promise Vector] -> TaskM Cluster
 mrReducer cid l = 
-  do vs <- mapM readPromise l
-     vs `seq` return (makeCluster cid vs)
+   do tsay "reducing"
+      let emptyCluster = makeCluster cid []
+       in foldM (\c pv -> do v <- readPromise pv
+                             c `seq` return $ addToCluster c v) emptyCluster l
 
 $( remotable ['mrMapper,  'mrReducer] )
 
@@ -42,13 +42,12 @@ again n f i = do tsay (show n++" iterations remaining")
                  again (n-1) f q
 
 initialProcess "MASTER" = 
-                   do
-                      setNodeLogConfig defaultLogConfig {logLevel = LoInformation} 
+                   do setNodeLogConfig defaultLogConfig {logLevel = LoInformation} 
                       clusters <- liftIO $ getClusters "kmeans-clusters"
                       points <- liftIO $ getPoints2 "kmeans-points"
                       say $ "starting master"
                       ans <- runTask $
-                        do 
+                        do
                            vpoints <- mapM toPromise points
                            ppoints <- toPromise vpoints
                            let myMapReduce = 
@@ -60,7 +59,8 @@ initialProcess "MASTER" =
                                 }
                            again 4 (mapReduce myMapReduce) clusters
                       say $ show ans
-initialProcess _ = say "starting worker" >> receiveWait [] 
+initialProcess _ =  setNodeLogConfig defaultLogConfig {logLevel = LoInformation} 
+                      >> say "starting worker" >> receiveWait [] 
 
 main = remoteInit (Just "config") [Main.__remoteCallMetaData] initialProcess
 

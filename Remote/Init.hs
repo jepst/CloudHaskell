@@ -8,7 +8,7 @@ import Remote.Task (__remoteCallMetaData)
 import Remote.Process (suppressTransmitException,pbracket,localRegistryRegisterNode,localRegistryHello,localRegistryUnregisterNode,
                        startProcessMonitorService,startNodeMonitorService,startLoggingService,startSpawnerService,ProcessM,readConfig,initNode,startLocalRegistry,
                        forkAndListenAndDeliver,waitForThreads,roleDispatch,Node,runLocalProcess,performFinalization,startFinalizerService)
-import Remote.Call (registerCalls,RemoteCallMetaData)
+import Remote.Reg (registerCalls,RemoteCallMetaData)
 
 import System.FilePath (FilePath)
 import System.Environment (getEnvironment)
