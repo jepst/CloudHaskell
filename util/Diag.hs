@@ -1,5 +1,11 @@
 module Main (main) where
 
+-- This is a diagnostic program that will
+-- give you feedback about what it sees
+-- as your current configuration of Cloud Haskell.
+-- If your program isn't able to talk to remote
+-- nodes, run this program to check your configuration.
+
 import Remote (remoteInit, getPeers, getSelfNode, ProcessM)
 import Remote.Process (hostFromNid,getConfig,cfgNetworkMagic,cfgKnownHosts)
 

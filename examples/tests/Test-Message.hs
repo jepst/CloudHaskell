@@ -1,6 +1,9 @@
 {-# LANGUAGE DeriveDataTypeable,TemplateHaskell #-}
 module Main where
 
+-- A convoluted example showing some different ways
+-- messages can be passed between processes.
+
 import Remote
 
 import Data.Typeable (Typeable)

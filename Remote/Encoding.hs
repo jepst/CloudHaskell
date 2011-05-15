@@ -30,6 +30,15 @@ import System.IO (Handle)
 import Data.Typeable (typeOf,Typeable)
 import Data.Generics (Data,gfoldl,gunfold, toConstr,constrRep,ConstrRep(..),repConstr,extQ,extR,dataTypeOf)
 
+-- | Data that can be sent as a message must implement
+-- this class. The class has no functions of its own,
+-- but instead simply requires that the type implement
+-- both 'Typeable' and 'Binary'. Typeable can usually
+-- be derived automatically. Binary requires the put and get
+-- functions, which can be easily implemented by hand,
+-- or you can use the 'genericGet' and 'genericPut' flavors,
+-- which will work automatically for types implementing
+-- 'Data'.
 class (Binary a,Typeable a) => Serializable a
 instance (Binary a,Typeable a) => Serializable a
 
@@ -104,11 +113,22 @@ serialDecode a = (\id ->
                          else return Nothing ) id
 
 
-{- By default, gfoldl will try to store a String as a list of Chars,
-   which is pretty inefficient. So, we special-case string serialization
-   to use the serialization provided by Binary. Other types could
-   also be easily special-cased
--}
+-- | Data types that can be used in messaging must
+-- be serializable, which means that they must implement
+-- the 'get' and 'put' methods from 'Binary'. If you
+-- are too lazy to write these functions yourself,
+-- you can delegate responsibility to this function.
+-- It's usually sufficient to do something like this:
+--
+-- > import Data.Data (Data)
+-- > import Data.Typeable (Typeable)
+-- > import Data.Binary (Binary, get, put)
+-- > data MyType = MkMyType Foobar Int [(String, Waddle Baz)]
+-- >             | MkSpatula
+-- >                  deriving (Data, Typeable)
+-- > instance Binary MyType where
+-- >    put = genericPut
+-- >    get = genericGet
 genericPut :: (Data a) => a ->  Put
 genericPut = generic `extQ` genericString
    where generic what = fst $ gfoldl 
@@ -118,6 +138,7 @@ genericPut = generic `extQ` genericString
          genericString :: String -> Put
          genericString = put.encode
 
+-- | See 'genericPut'
 genericGet :: Data a => Get a
 genericGet = generic `extR` genericString
    where generic = (\id -> liftM id $ deserializeConstr $ \constr_rep ->

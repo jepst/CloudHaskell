@@ -13,7 +13,7 @@ module Remote ( -- * The process layer
                 ProcessM, NodeId, ProcessId, MatchM,
                 getSelfPid, getSelfNode,
 
-                send,
+                send,sendQuiet,
 
                 spawn, spawnLocal, spawnAnd,
                 spawnLink,
@@ -38,7 +38,8 @@ module Remote ( -- * The process layer
 
                 remotable, RemoteCallMetaData, Lookup,
 
-                Closure(..), Payload, genericPut, genericGet, Serializable,
+                Closure, makeClosure, invokeClosure,
+                Payload, genericPut, genericGet, Serializable,
 
                 -- * Channels
 

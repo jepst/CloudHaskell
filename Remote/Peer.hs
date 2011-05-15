@@ -69,7 +69,11 @@ sendBroadcast port str
             return ()
 	)
 
--- | Find peers with 'getPeersStatic' and 'getPeersDynamic' and combines their results.
+-- | Returns information about all nodes on the current network
+-- that this node knows about. This function combines dynamic
+-- and static mechanisms. See documentation on 'getPeersStatic' 
+-- and 'getPeersDynamic' for more info. This function depends
+-- on the configuration values @cfgKnownHosts@ and @cfgPeerDiscoveryPort@.
 getPeers :: ProcessM PeerInfo
 getPeers = do a <- getPeersStatic
               b <- getPeersDynamic 500000

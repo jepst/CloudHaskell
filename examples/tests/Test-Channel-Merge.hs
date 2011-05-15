@@ -1,6 +1,14 @@
 {-# LANGUAGE TemplateHaskell,DeriveDataTypeable #-}
 module Main where	
 
+-- This example demonstrates the difference between
+-- the biased and round-robin methods for merging
+-- channels. Run this program twice, once with
+-- the parameter "biased" and once with "rr";
+-- the order that the messages will be received
+-- in will change, even though the order that they
+-- are sent in does not.
+
 import Remote
 
 channelCombiner args = case args of
@@ -8,7 +16,7 @@ channelCombiner args = case args of
                          ["rr"] -> combinePortsRR
                          _ -> error "Please specify 'biased' or 'rr' on the command line"
 
-initialProcess "NODE" = do
+initialProcess _ = do
               mypid <- getSelfPid
               args <- getCfgArgs
 

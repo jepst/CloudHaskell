@@ -9,14 +9,7 @@ module Remote.Call (
         ) where
 
 import Language.Haskell.TH
-import Data.Maybe (maybe)
-import Data.List (intercalate,null)
-import qualified Data.Map as Map (Map,insert,lookup,empty,toList) 
-import Data.Dynamic (toDyn,Dynamic,fromDynamic,dynTypeRep)
-import Data.Generics (Data)
-import Data.Typeable (typeOf,Typeable)
-import Data.Binary (Binary)
-import Remote.Encoding (Payload,serialDecode,serialEncode,serialEncodePure,Serializable)
+import Remote.Encoding (Payload,serialDecode,serialEncode,serialEncodePure)
 import Control.Monad.Trans (liftIO)
 import Control.Monad (liftM)
 import Remote.Closure (Closure(..))
@@ -130,6 +123,7 @@ remotable names =
                                            (AppT (ConT n) _) -> (AppT (ConT n) payload)
                                            _ -> toProcessM payload
                                      _ -> toProcessM payload
+                    processmtoclosure (AppT mc x) | mc == ttprocessm && isarrow x = AppT ttclosure x
                     processmtoclosure (x) =  (AppT ttclosure x)
                     isarrowful = isarrow $ last arglist
                     isarrow (AppT (AppT ArrowT _) _) = True

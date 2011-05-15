@@ -2,7 +2,7 @@ Name:                remote
 Version:             0.1
 Cabal-Version:       >=1.2
 Description:         Fault-tolerant distributed computing framework
-synopsis:            Fault-tolerant distributed computing framework
+synopsis:            Cloud Haskell
 License:             BSD3
 License-file:        LICENSE
 Extra-Source-Files:  README

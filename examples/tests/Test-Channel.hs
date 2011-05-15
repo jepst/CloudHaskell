@@ -1,5 +1,8 @@
 {-# LANGUAGE TemplateHaskell,DeriveDataTypeable #-}
-module Main where	
+module Main where
+
+-- Simple example of putting data in a channel
+-- and then taking it out.	
 
 import Remote
 

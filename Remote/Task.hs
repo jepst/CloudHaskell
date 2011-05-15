@@ -29,18 +29,16 @@ module Remote.Task (
                    ) where
 
 import Remote.Reg (putReg,getEntryByIdent)
-import Remote.Encoding (serialEncodePure,hGetPayload,hPutPayload,Payload(..),getPayloadContent,Serializable,serialDecode,serialEncode,genericGet,genericPut)
-import Remote.Process (pfinally, roundtripQuery, roundtripQueryUnsafe, ServiceException(..), spawnAnd, defaultSpawnOptions, AmSpawnOptions(..), TransmitStatus(..),diffTime,getConfig,Config(..),matchProcessDown,terminate,nullPid,monitorProcess,TransmitException(..),MonitorAction(..),ptry,LogConfig(..),getLogConfig,setNodeLogConfig,setLogConfig,nodeFromPid,LogLevel(..),LogTarget(..),logS,getLookup,say,LogSphere,NodeId,ProcessM,ProcessId,PayloadDisposition(..),getSelfPid,getSelfNode,matchUnknownThrow,receiveWait,receiveTimeout,roundtripResponse,roundtripResponseAsync,roundtripQueryImpl,match,invokeClosure,makePayloadClosure,spawn,spawnLocal,spawnLocalAnd,setDaemonic,send,makeClosure)
+import Remote.Encoding (serialEncodePure,hGetPayload,hPutPayload,Payload(..),getPayloadContent,Serializable,serialDecode,serialEncode)
+import Remote.Process (roundtripQuery, roundtripQueryUnsafe, ServiceException(..), spawnAnd, AmSpawnOptions(..), TransmitStatus(..),diffTime,getConfig,Config(..),matchProcessDown,terminate,nullPid,monitorProcess,TransmitException(..),MonitorAction(..),ptry,LogConfig(..),getLogConfig,setNodeLogConfig,setLogConfig,nodeFromPid,LogLevel(..),LogTarget(..),logS,getLookup,say,LogSphere,NodeId,ProcessM,ProcessId,PayloadDisposition(..),getSelfPid,getSelfNode,matchUnknownThrow,receiveWait,receiveTimeout,roundtripResponse,roundtripResponseAsync,roundtripQueryImpl,match,invokeClosure,makePayloadClosure,spawn,spawnLocal,spawnLocalAnd,setDaemonic,send,makeClosure)
 import Remote.Closure (Closure(..))
 import Remote.Peer (getPeers)
 
-import Data.Maybe (fromMaybe)
 import Data.Dynamic (Dynamic, toDyn, fromDynamic)
 import System.IO (withFile,IOMode(..))
 import System.Directory (renameFile)
 import Data.Binary (Binary,get,put,putWord8,getWord8)
 import Control.Exception (SomeException,Exception,throw,try)
-import Data.Unique (hashUnique,newUnique)
 import Data.Typeable (Typeable)
 import Control.Monad (liftM,when)
 import Control.Monad.Trans (liftIO)
@@ -49,14 +47,11 @@ import qualified Data.Map as Map (Map,fromList,insert,lookup,empty,elems,insertW
 import Data.List ((\\),union,nub,groupBy,sortBy,delete,intercalate)
 import System.FilePath (FilePath)
 import Data.Time (UTCTime,getCurrentTime)
-import Control.Concurrent (threadDelay)
 
 -- imports required for hashClosure; is there a lighter-weight of doing this?
 import Data.Digest.Pure.MD5 (md5)
 import Data.ByteString.Lazy.UTF8 (fromString)
 import qualified Data.ByteString.Lazy as B (concat)
-
-import Debug.Trace (trace)
 
 ----------------------------------------------
 -- * Promises and tasks
@@ -313,7 +308,7 @@ spawnDaemonic p = spawnLocalAnd p setDaemonic
 runWorkerNode :: ProcessId -> NodeId -> ProcessM ProcessId
 runWorkerNode masterpid nid = 
      do clo <- makeClosure "Remote.Task.runWorkerNode__impl" (masterpid) :: ProcessM (Closure (ProcessM ()))
-        spawnAnd nid clo defaultSpawnOptions {amsoMonitor=Just (masterpid,MaMonitor)}
+        spawn nid clo 
 
 runWorkerNode__impl :: Payload -> ProcessM ()
 runWorkerNode__impl pl = 
@@ -336,7 +331,7 @@ __remoteCallMetaData x = putReg runWorkerNode__impl "Remote.Task.runWorkerNode__
 updatePromiseInMemory :: PromiseStorage -> IO PromiseStorage
 updatePromiseInMemory (PromiseInMemory p _ d) = do utc <- getCurrentTime
                                                    return $ PromiseInMemory p utc d
-updatePromiseInMeory other = return other
+updatePromiseInMemory other = return other
 
 makePromiseInMemory :: PromiseData -> Maybe Dynamic -> IO PromiseStorage
 makePromiseInMemory p dyn = do utc <- getCurrentTime
@@ -347,7 +342,7 @@ makePromiseInMemory p dyn = do utc <- getCurrentTime
 chunkify :: Int -> [a] -> [[a]] 
 chunkify numChunks l = splitSize (ceiling $ fromIntegral (length l) / fromIntegral numChunks) l
    where
-      splitSize i [] = []
+      splitSize _ [] = []
       splitSize i v = let (first,second) = splitAt i v 
                        in first : splitSize i second
 
@@ -570,7 +565,7 @@ runMaster :: (ProcessId -> ProcessM ()) -> ProcessM ProcessId
 runMaster masterproc = 
   let
      probeOnce nodes seen masterpid =
-        do recentlist <- findPeers
+        do recentlist <- findPeers -- TODO if a node fails to response to a probe even once, it's gone forever; be more flexible
            let newseen = seen `union` recentlist
            let topidlist = recentlist \\ seen
            let getnid (_,n,_) = n
@@ -702,6 +697,7 @@ toPromiseAt locality a = newPromiseAt locality (passthrough__closure a)
 -- | Similar to 'toPromiseAt' and 'newPromiseNear'
 toPromiseNear :: (Serializable a,Serializable b) => Promise b -> a -> TaskM (Promise a)
 toPromiseNear (PromiseImmediate _) = toPromise
+-- TODO should I consult tsRedeemerForwarding here?
 toPromiseNear (PromiseBasic prhost prid) = toPromiseAt (LcByNode [nodeFromPid prhost])
 
 -- | Creates an /immediate promise/, which is to say, a promise

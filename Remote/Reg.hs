@@ -1,4 +1,4 @@
--- | Compile-time metadata functions, part of the 
+-- | Runtime metadata functions, part of the 
 -- RPC mechanism
 module Remote.Reg (
          -- * Runtime metadata
@@ -16,7 +16,7 @@ import Data.Typeable (Typeable)
 import qualified Data.Map as Map (insert,lookup,Map,empty)
 
 ----------------------------------------------
--- * Run-time metadata
+-- * Runtime metadata
 ------------------------------
 
 -- | Data of this type is generated at compile-time

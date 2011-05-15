@@ -1,7 +1,7 @@
 {-# LANGUAGE TemplateHaskell #-}
 module Main where
 
-{- A simple word frequency counter using the task layer's mapreduce. -}
+-- A simple word frequency counter using the task layer's mapreduce.
 
 import Remote
 

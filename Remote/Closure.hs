@@ -18,9 +18,9 @@ import Remote.Encoding (Payload)
 --   In spirit, this is actually:
 --    
 -- >   data Closure a where
--- >     Closure :: Serializable v => (v -#> a) -> v -> Closure a     
+-- >     Closure :: Serializable v => Static (v -> a) -> v -> Closure a     
 --
---   where funny arrow (-#>) identifies a function with no free variables.
+--   where the Static type wraps a function with no non-static free variables.
 --   We simulate this behavior by identifying top-level functions as strings.
 --   See the paper for clarification.
 data Closure a = Closure String Payload

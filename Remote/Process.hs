@@ -15,7 +15,7 @@ module Remote.Process  (
                        match,matchIf,matchUnknown,matchUnknownThrow,matchProcessDown,
 
                        -- * Message sending
-                       send,
+                       send,sendQuiet,
 
                        -- * Logging functions
                        logS,say,
@@ -62,24 +62,24 @@ module Remote.Process  (
                        where
 
 import Control.Concurrent (forkIO,ThreadId,threadDelay)
-import Control.Concurrent.MVar (withMVar,MVar,newMVar, newEmptyMVar,isEmptyMVar,takeMVar,putMVar,modifyMVar,modifyMVar_,readMVar)
+import Control.Concurrent.MVar (MVar,newMVar, newEmptyMVar,isEmptyMVar,takeMVar,putMVar,modifyMVar,modifyMVar_,readMVar)
 import Prelude hiding (catch)
-import Control.Exception (ErrorCall(..),throwTo,bracket,try,Exception,throw,evaluate,finally,SomeException,PatternMatchFail(..),catch)
+import Control.Exception (ErrorCall(..),throwTo,bracket,try,Exception,throw,evaluate,finally,SomeException,catch)
 import Control.Monad (foldM,when,liftM,forever)
-import Control.Monad.Trans (MonadTrans,lift,MonadIO,liftIO)
+import Control.Monad.Trans (MonadIO,liftIO)
 import Data.Binary (Binary,put,get,putWord8,getWord8)
 import Data.Char (isSpace,isDigit)
 import Data.List (isSuffixOf,foldl', isPrefixOf,nub)
-import Data.Maybe (listToMaybe,catMaybes,fromJust,isNothing)
+import Data.Maybe (catMaybes,isNothing)
 import Data.Typeable (Typeable)
 import Data.Unique (newUnique,hashUnique)
-import System.IO (Handle,hIsEOF,hClose,hSetBuffering,hGetChar,hPutChar,BufferMode(..),hFlush)
+import System.IO (Handle,hClose,hSetBuffering,hGetChar,hPutChar,BufferMode(..),hFlush)
 import System.IO.Error (isEOFError,isDoesNotExistError,isUserError)
 import System.FilePath (FilePath)
 import Network.BSD (HostEntry(..),getHostName)
-import Network (HostName,PortID(..),PortNumber(..),listenOn,accept,sClose,connectTo,Socket)
+import Network (HostName,PortID(..),PortNumber,listenOn,accept,sClose,connectTo,Socket)
 import Network.Socket (PortNumber(..),setSocketOption,SocketOption(..),socketPort,aNY_PORT )
-import qualified Data.Map as Map (Map,keys,fromList,unionWith,elems,singleton,member,update,map,empty,adjust,alter,insert,delete,lookup,toList,size,insertWith')
+import qualified Data.Map as Map (Map,keys,fromList,unionWith,elems,singleton,member,update,empty,adjust,alter,insert,delete,lookup,toList,size,insertWith')
 import Remote.Reg (getEntryByIdent,Lookup,empty)
 import Remote.Encoding (serialEncode,serialDecode,serialEncodePure,serialDecodePure,Payload,Serializable,PayloadLength,genericPut,genericGet,hPutPayload,hGetPayload,payloadLength,getPayloadType)
 import System.Environment (getArgs)
@@ -651,7 +651,7 @@ forkProcessWeak f = do p <- getProcess
                        return ()
 
 -- | Create a new process on the current node. Returns the new process's identifier.
--- Unlike 'spawnRemote', this function does not need a 'Closure' or a 'NodeId'. 
+-- Unlike 'spawn', this function does not need a 'Closure' or a 'NodeId'. 
 spawnLocal :: ProcessM () -> ProcessM ProcessId
 spawnLocal fun = do p <- getProcess
                     liftIO $ runLocalProcess (prNodeRef p) fun
@@ -868,6 +868,11 @@ send pid msg = sendSimple pid msg PldUser >>=
                                                     QteOK -> return ()
                                                     _ -> throw $ TransmitException x
                                           )
+
+-- | Like 'send', but in case of error returns a value rather than throw
+-- an exception.
+sendQuiet :: (Serializable a) => ProcessId -> a -> ProcessM TransmitStatus
+sendQuiet p m = sendSimple p m PldUser
 
 sendSimple :: (Serializable a) => ProcessId -> a -> PayloadDisposition -> ProcessM TransmitStatus
 sendSimple pid dat pld = sendTry pid dat (Nothing :: Maybe ()) pld
@@ -2282,13 +2287,13 @@ terminate = throw ProcessTerminationException
 unpause :: ProcessId -> ProcessM ()
 unpause pid = send pid AmSpawnUnpause
 
--- | A variant of 'spawnRemote' that starts the remote process with
+-- | A variant of 'spawn' that starts the remote process with
 -- bidirectoinal monitoring, as in 'linkProcess'
 spawnLink :: NodeId -> Closure (ProcessM ()) -> ProcessM ProcessId
 spawnLink node clo = do mypid <- getSelfPid
                         spawnAnd node clo defaultSpawnOptions {amsoLink=Just mypid}
 
--- | A variant of spawnRemote that allows greater control over how the remote process is started.
+-- | A variant of 'spawn' that allows greater control over how the remote process is started.
 spawnAnd :: NodeId -> Closure (ProcessM ()) -> AmSpawnOptions -> ProcessM ProcessId
 spawnAnd node clo opt = 
     do res <- roundtripQueryUnsafe PldAdmin (adminGetPid node ServiceSpawner) (AmSpawn clo opt) 
@@ -2338,7 +2343,7 @@ startSpawnerService = serviceThread ServiceSpawner spawner
                                         Right (Just pl) -> responder (Just pl)
          spawnWorker c = do a <- invokeClosure c
                             case a of
-                                Nothing -> (logS "SYS" LoCritical $ "Failed to invoke closure "++(show c)) --TODO it would be nice if this error could be propagated to the caller of spawnRemote, at the very least it should throw an exception so a linked process will be notified 
+                                Nothing -> (logS "SYS" LoCritical $ "Failed to invoke closure "++(show c)) --TODO it would be nice if this error could be propagated to the caller of spawn, at the very least it should throw an exception so a linked process will be notified 
                                 Just q -> q
          matchCallRequest = roundtripResponseAsync 
                (\cmd sender -> case cmd of
