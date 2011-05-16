@@ -138,7 +138,7 @@ genericPut = generic `extQ` genericString
          genericString :: String -> Put
          genericString = put.encode
 
--- | See 'genericPut'
+-- | This is the counterpart 'genericPut'
 genericGet :: Data a => Get a
 genericGet = generic `extR` genericString
    where generic = (\id -> liftM id $ deserializeConstr $ \constr_rep ->
