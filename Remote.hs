@@ -61,7 +61,7 @@ module Remote ( -- * The process layer
                 TaskException(..),
 
                 MapReduce(..), mapReduce,
-                chunkify,
+                chunkify, shuffle,
 
               ) where
 

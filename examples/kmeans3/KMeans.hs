@@ -55,7 +55,8 @@ initialProcess "MASTER" =
                                 {
                                  mtMapper = mrMapper__closure ppoints,
                                  mtReducer = mrReducer__closure,
-                                 mtChunkify = chunkify 5
+                                 mtChunkify = chunkify 5,
+                                 mtShuffle = shuffle
                                 }
                            again 4 (mapReduce myMapReduce) clusters
                       say $ show ans

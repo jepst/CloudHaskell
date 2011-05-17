@@ -29,7 +29,8 @@ myMapReduce = MapReduce
                {
                  mtMapper = mrMapper__closure,
                  mtReducer = mrReducer__closure,
-                 mtChunkify = chunkify 5
+                 mtChunkify = chunkify 5,
+                 mtShuffle = shuffle
                }
 
 initialProcess "MASTER" = 

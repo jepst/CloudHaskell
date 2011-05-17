@@ -17,6 +17,7 @@ module Remote.Task (
 
                    -- * Useful auxilliaries
                    chunkify,
+                   shuffle,
                    tsay,
                    tlogS,
                    Locality(..),
@@ -25,7 +26,6 @@ module Remote.Task (
                    -- * Internals, not for general use
                    __remoteCallMetaData,
                    remoteCallRectify,
-                   grouping
                    ) where
 
 import Remote.Reg (putReg,getEntryByIdent)
@@ -918,11 +918,12 @@ data MapReduce input key middle result
       {
         mtMapper :: [input] -> Closure (TaskM [(key,Promise middle)]),
         mtReducer :: key -> [Promise middle] -> Closure (TaskM result),
-        mtChunkify :: [input] -> [[input]]
+        mtChunkify :: [input] -> [[input]],
+        mtShuffle :: [(key,Promise middle)] -> [(key,[Promise middle])]
       }
 
-grouping :: Ord a => [(a,b)] -> [(a,[b])]
-grouping q = 
+shuffle :: Ord a => [(a,b)] -> [(a,[b])]
+shuffle q = 
     let semi = groupBy (\(a,_) (b,_) -> a==b) (sortBy (\(a,_) (b,_) -> compare a b) q)
      in map (\x -> (fst $ head x,map snd x)) semi 
 
@@ -945,7 +946,7 @@ mapReduce mr inputs =
            pmapResult <- mapM (\chunk -> 
                  newPromise ((mtMapper mr) chunk) ) chunks
            mapResult <- mapM readPromise pmapResult
-           let shuffled = grouping (concat mapResult)
+           let shuffled = (mtShuffle mr) (concat mapResult)
            pres <- mapM (\(key,ps) -> 
                   newPromise ((mtReducer mr) key ps)) shuffled
            mapM readPromise pres
