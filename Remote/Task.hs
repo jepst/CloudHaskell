@@ -907,12 +907,12 @@ tlogS a b c = liftTask $ logS a b c
 -- The user must provide their own mapper and reducer.
 -- For many cases, the default chunkifier ('chunkify')
 -- and shuffler ('shuffle') are adequate.
-data MapReduce input middle1 middle2 result 
+data MapReduce rawinput input middle1 middle2 result 
     = MapReduce
       {
         mtMapper :: input -> Closure (TaskM [middle1]),
         mtReducer :: middle2 -> Closure (TaskM result),
-        mtChunkify :: input -> [input],
+        mtChunkify :: rawinput -> [input],
         mtShuffle :: [middle1] -> [middle2]
       }
 
@@ -926,7 +926,9 @@ shuffle q =
 -- | A convenient way to provide the 'mtChunkify' function
 -- as part of 'mapReduce'. 
 chunkify :: Int -> [a] -> [[a]] 
-chunkify numChunks l = splitSize (ceiling $ fromIntegral (length l) / fromIntegral numChunks) l
+chunkify numChunks l 
+  | numChunks <= 0 = taskError "Can't chunkify into less than one chunk"
+  | otherwise = splitSize (ceiling $ fromIntegral (length l) / fromIntegral numChunks) l
    where
       splitSize _ [] = []
       splitSize i v = let (first,second) = splitAt i v 
@@ -946,7 +948,7 @@ chunkify numChunks l = splitSize (ceiling $ fromIntegral (length l) / fromIntegr
 --
 -- * result -- The output of the reducer, upon being given a bunch of middles.
 mapReduce :: (Serializable i,Serializable k,Serializable m,Serializable r) =>
-             MapReduce i k m r -> i -> TaskM [r]
+             MapReduce ri i k m r -> ri -> TaskM [r]
 mapReduce mr inputs =
     let chunks = (mtChunkify mr) inputs 
      in do 
