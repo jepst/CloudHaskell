@@ -781,6 +781,9 @@ roundtripQuery pld pid dat =
                    PldAdmin -> generalPid pid
                    _ -> pid
 
+roundtripQueryLocal :: (Serializable a, Serializable b) => PayloadDisposition -> ProcessId -> a -> ProcessM (Either TransmitStatus b)
+roundtripQueryLocal pld pid dat = roundtripQueryImpl 0 pld pid dat id []
+
 roundtripQueryUnsafe :: (Serializable a, Serializable b) => PayloadDisposition -> ProcessId -> a -> ProcessM (Either TransmitStatus b)
 roundtripQueryUnsafe pld pid dat = 
                        do cfg <- getConfig
@@ -1672,7 +1675,7 @@ instance Binary NodeMonitorInformation where
 monitorNode :: NodeId -> ProcessM ()
 monitorNode nid = do 
                      mynid <- getSelfNode
-                     res <- roundtripQueryUnsafe PldAdmin (adminGetPid mynid ServiceNodeMonitor) (NodeMonitorStart nid)
+                     res <- roundtripQueryLocal PldAdmin (adminGetPid mynid ServiceNodeMonitor) (NodeMonitorStart nid)
                      case res of
                        Right () -> return ()
                        _ -> (throw $ ServiceException $ "while contacting node monitor "++show res)
@@ -1988,9 +1991,9 @@ linkProcess p = do mypid <- getSelfPid
                    let servicepid = (adminGetPid mynid ServiceProcessMonitor) 
                        msg1 = GlMonitor mypid p MaLinkError
                        msg2 = GlMonitor p mypid MaLinkError
-                   res1 <- roundtripQueryUnsafe PldAdmin servicepid msg1
+                   res1 <- roundtripQueryLocal PldAdmin servicepid msg1
                    case res1 of 
-                      Right QteOK -> do res2 <- roundtripQueryUnsafe PldAdmin servicepid msg2
+                      Right QteOK -> do res2 <- roundtripQueryLocal PldAdmin servicepid msg2
                                         case res2 of 
                                            Right QteOK -> return ()
                                            Right err -> herr err
@@ -2062,7 +2065,7 @@ monitorProcessImpl :: (ProcessId -> ProcessId -> MonitorAction -> GlCommand) -> 
 monitorProcessImpl msgtype monitor monitee how = 
      let msg = msgtype monitor monitee how
       in do let servicepid = (adminGetPid (nodeFromPid monitee) ServiceProcessMonitor) 
-            res <- roundtripQueryUnsafe PldAdmin servicepid msg
+            res <- roundtripQueryUnsafe PldAdmin servicepid msg -- TODO: Prefer to send this message to the local service
             case res of
               Right QteOK -> return ()
               err -> herr err

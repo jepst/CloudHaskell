@@ -337,15 +337,6 @@ makePromiseInMemory :: PromiseData -> Maybe Dynamic -> IO PromiseStorage
 makePromiseInMemory p dyn = do utc <- getCurrentTime
                                return $ PromiseInMemory p utc dyn
 
--- | A convenient way to provide the 'mtChunkify' function
--- as part of 'mapReduce'. 
-chunkify :: Int -> [a] -> [[a]] 
-chunkify numChunks l = splitSize (ceiling $ fromIntegral (length l) / fromIntegral numChunks) l
-   where
-      splitSize _ [] = []
-      splitSize i v = let (first,second) = splitAt i v 
-                       in first : splitSize i second
-
 forwardLogs :: Maybe ProcessId -> ProcessM ()
 forwardLogs masterpid = 
         do lc <- getLogConfig
@@ -911,21 +902,35 @@ tlogS a b c = liftTask $ logS a b c
 -- The number of mapper processes can be controlled
 -- by the user by controlling the length of the string
 -- returned by mtChunkify. The number of reducer
--- promises is controlled by the number of distinct key
--- values returned by mappers.
-data MapReduce input key middle result 
+-- promises is controlled by the number of values
+-- values returned by shuffler.
+-- The user must provide their own mapper and reducer.
+-- For many cases, the default chunkifier ('chunkify')
+-- and shuffler ('shuffle') are adequate.
+data MapReduce input middle1 middle2 result 
     = MapReduce
       {
-        mtMapper :: [input] -> Closure (TaskM [(key,Promise middle)]),
-        mtReducer :: key -> [Promise middle] -> Closure (TaskM result),
-        mtChunkify :: [input] -> [[input]],
-        mtShuffle :: [(key,Promise middle)] -> [(key,[Promise middle])]
+        mtMapper :: input -> Closure (TaskM [middle1]),
+        mtReducer :: middle2 -> Closure (TaskM result),
+        mtChunkify :: input -> [input],
+        mtShuffle :: [middle1] -> [middle2]
       }
 
+-- | A convenient way to provide the 'mtShuffle' function
+-- as part of 'mapReduce'. 
 shuffle :: Ord a => [(a,b)] -> [(a,[b])]
 shuffle q = 
     let semi = groupBy (\(a,_) (b,_) -> a==b) (sortBy (\(a,_) (b,_) -> compare a b) q)
      in map (\x -> (fst $ head x,map snd x)) semi 
+
+-- | A convenient way to provide the 'mtChunkify' function
+-- as part of 'mapReduce'. 
+chunkify :: Int -> [a] -> [[a]] 
+chunkify numChunks l = splitSize (ceiling $ fromIntegral (length l) / fromIntegral numChunks) l
+   where
+      splitSize _ [] = []
+      splitSize i v = let (first,second) = splitAt i v 
+                       in first : splitSize i second
 
 -- | The MapReduce algorithm, implemented in a very
 -- simple form on top of the Task layer. Its
@@ -933,13 +938,15 @@ shuffle q =
 --
 -- * input -- The data type provided as the input to the algorithm as a whole and given to the mapper.
 --
--- * middle -- The output of the mapper function.
+-- * middle1 -- The output of the mapper. This may include some /key/ which is used by the shuffler to allocate data to reducers.
+-- If you use the default shuffler, 'shuffle', this type must have the form @Ord a => (a,b)@.
 --
--- * key -- A comparable data type that is used to assign various middles to common reducers.
+-- * middle2 -- The output of the shuffler. The default shuffler emits a type in the form @Ord => (a,[b])@. Each middle2 output 
+-- by shuffler is given to a separate reducer.
 --
 -- * result -- The output of the reducer, upon being given a bunch of middles.
-mapReduce :: (Serializable i,Ord k,Serializable k,Serializable m,Serializable r) =>
-             MapReduce i k m r -> [i] -> TaskM [r]
+mapReduce :: (Serializable i,Serializable k,Serializable m,Serializable r) =>
+             MapReduce i k m r -> i -> TaskM [r]
 mapReduce mr inputs =
     let chunks = (mtChunkify mr) inputs 
      in do 
@@ -947,7 +954,7 @@ mapReduce mr inputs =
                  newPromise ((mtMapper mr) chunk) ) chunks
            mapResult <- mapM readPromise pmapResult
            let shuffled = (mtShuffle mr) (concat mapResult)
-           pres <- mapM (\(key,ps) -> 
-                  newPromise ((mtReducer mr) key ps)) shuffled
+           pres <- mapM (\mid2 -> 
+                  newPromise ((mtReducer mr) mid2)) shuffled
            mapM readPromise pres
 

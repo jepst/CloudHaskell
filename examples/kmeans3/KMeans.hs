@@ -26,8 +26,8 @@ mrMapper ppoints clusters =
                   vp `seq` return (assignment vp,point)
 
 
-mrReducer :: ClusterId -> [Promise Vector] -> TaskM Cluster
-mrReducer cid l = 
+mrReducer :: (ClusterId,[Promise Vector]) -> TaskM Cluster
+mrReducer (cid,l) = 
    do tsay "reducing"
       let emptyCluster = makeCluster cid []
        in foldM (\c pv -> do v <- readPromise pv

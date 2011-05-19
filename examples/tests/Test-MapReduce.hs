@@ -13,15 +13,13 @@ import Debug.Trace
 type Line = String
 type Word = String
 
-mrMapper :: [Line] -> TaskM [(Word, Promise Int)]
+mrMapper :: [Line] -> TaskM [(Word, Int)]
 mrMapper lines = 
-    do one <- toPromiseImm (1::Int)
-       return $ concat $ map (\line -> map (\w -> (w,one)) (words line)) lines
+      return $ concat $ map (\line -> map (\w -> (w,1)) (words line)) lines
 
-mrReducer :: Word -> [Promise Int] -> TaskM (Word,Int)
-mrReducer w p = 
-  do m <- mapM readPromise p
-     return (w,sum m)
+mrReducer :: (Word,[Int]) -> TaskM (Word,Int)
+mrReducer (w,p) = 
+    return (w,sum p)
 
 $( remotable ['mrMapper,  'mrReducer] )
 
