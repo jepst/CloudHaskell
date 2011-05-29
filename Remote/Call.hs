@@ -45,7 +45,7 @@ mkClosure n = do info <- reify n
 -- > import Remote.Call (remotable)
 -- >    ...
 --
--- 2. Define your functions normally. Restrictions: no polymorphism; all parameters must be Serializable; return value must be pure, or in one of the 'ProcessM', 'TaskM', or 'IO' monads; probably other restrictions as well.
+-- 2. Define your functions normally. Restrictions: function's type signature must be explicitly declared; no polymorphism; all parameters must be Serializable; return value must be pure, or in one of the 'ProcessM', 'TaskM', or 'IO' monads; probably other restrictions as well.
 --
 -- > greet :: String -> ProcessM ()
 -- > greet name = say ("Hello, "++name)

@@ -2273,6 +2273,10 @@ instance Binary AmSpawnUnpause where
    put AmSpawnUnpause = return ()
    get = return AmSpawnUnpause
 
+-- TODO. Of course, this would need to be in a different module.
+-- spawnWithChannel :: NodeId -> Closure (ReceivePort a -> ProcessM ()) -> ProcessM SendPort
+-- spawnWithChannel nid clo = send ...
+
 -- | Start a process running the code, given as a closure, on the specified node.
 -- If successful, returns the process ID of the new process. If unsuccessful,
 -- throw a 'TransmitException'. 
