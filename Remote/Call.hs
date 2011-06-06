@@ -6,6 +6,7 @@ module Remote.Call (
 -- * Compile-time metadata
          remotable,
          mkClosure,
+         mkClosureRec,
         ) where
 
 import Language.Haskell.TH
@@ -17,6 +18,8 @@ import Remote.Process (ProcessM)
 import Remote.Reg (Lookup,putReg,RemoteCallMetaData)
 import Remote.Task (remoteCallRectify,TaskM)
 
+-- TODO this module is the result of months of tiny thoughtless changes and desperately needs a clean-up
+
 ----------------------------------------------
 -- * Compile-time metadata
 ----------------------------------------------
@@ -24,6 +27,10 @@ import Remote.Task (remoteCallRectify,TaskM)
 -- | A compile-time macro to expand a function name to its corresponding
 -- closure name (if such a closure exists), suitable for use with
 -- 'spawn', 'callRemote', etc
+-- In general, using the syntax @$(mkClosure foo)@ is the same
+-- as addressing the closure generator by name, that is,
+-- @foo__closure@. In some cases you may need to use
+-- 'mkClosureRec' instead.
 mkClosure :: Name -> Q Exp
 mkClosure n = do info <- reify n
                  case info of
@@ -34,6 +41,40 @@ mkClosure n = do info <- reify n
                               VarI newiname _ _ _ -> varE newiname
                               _ -> error $ "Unexpected type of closure symbol for "++show n
                     _ -> error $ "No closure corresponding to "++show n
+
+
+-- | A variant of 'mkClosure' suitable for expanding closures
+-- of functions declared in the same module, including that
+-- of the function it's used in. The Rec stands for recursive.
+-- If you get the @Something is not in scope at a reify@ message
+-- when using mkClosure, try using this function instead.
+-- Using this function also turns off the static
+-- checks used by mkClosure, and therefore you are responsible
+-- for making sure that you use 'remotable' with each function
+-- that may be an argument of mkClosureRec
+mkClosureRec :: Name -> Q Exp
+mkClosureRec name =
+  do loc <- location
+     info <- reify name
+     case info of
+       VarI aname atype _ _ -> 
+        let modname = case nameModule aname of
+                        Just a -> a
+                        _ -> error "Non-module name at mkClosureRec "++show name
+         in
+           case modname == loc_module loc of
+             True -> let implFqn = loc_module loc ++"." ++ nameBase aname ++ "__impl" 
+                         closurecall = [e| Remote.Closure.Closure |]
+                         encodecall = [e| Remote.Encoding.serialEncodePure |]
+                         paramnames = map (\x -> 'a' : show x) [1..(length (init arglist))]
+                         arglist = getParams atype
+                         paramnamesP = (map (varP . mkName) paramnames)
+                         paramnamesE = (map (varE . mkName) paramnames)
+                         paramnamesT = map (\(v,t) -> sigE v (return t)) (zip paramnamesE arglist)
+                      in lamE paramnamesP (appE (appE closurecall (litE (stringL implFqn))) (appE encodecall (tupE paramnamesT)))
+             False -> error $ show aname++": mkClosureRec can only make closures of functions in the same module; use mkClosure instead"
+       _ -> error $ "Unexpected type of symbol for "++show name
+     
 
 -- | A compile-time macro to provide easy invocation of closures.
 -- To use this, follow the following steps:
@@ -184,16 +225,17 @@ remotable names =
                   in ([closuredec,closuredef,impldec,impldef]++if not isarrowful then [implPldec,implPldef] else [],
                               [aname,implName]++if not isarrowful then [implPlName] else [])
  
-          getType name = 
-             do info <- reify name
-                case info of 
-                  VarI iname itype _ _ -> return [(iname,itype)]
-                  _ -> return []
-          putParams (afst:lst:[]) = AppT (AppT ArrowT afst) lst
-          putParams (afst:[]) = afst
-          putParams (afst:lst) = AppT (AppT ArrowT afst) (putParams lst)
-          putParams [] = error "Unexpected parameter type in remotable processing"
-          getParams typ = case typ of
+getType name = 
+  do info <- reify name
+     case info of 
+       VarI iname itype _ _ -> return [(iname,itype)]
+       _ -> return []
+
+putParams (afst:lst:[]) = AppT (AppT ArrowT afst) lst
+putParams (afst:[]) = afst
+putParams (afst:lst) = AppT (AppT ArrowT afst) (putParams lst)
+putParams [] = error "Unexpected parameter type in remotable processing"
+getParams typ = case typ of
                             AppT (AppT ArrowT b) c -> b : getParams c
                             b -> [b]
                                 

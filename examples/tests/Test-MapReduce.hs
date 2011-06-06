@@ -15,7 +15,7 @@ type Word = String
 
 mrMapper :: [Line] -> TaskM [(Word, Int)]
 mrMapper lines = 
-      return $ concat $ map (\line -> map (\w -> (w,1)) (words line)) lines
+      return (concatMap (\line -> map (\w -> (w,1)) (words line)) lines)
 
 mrReducer :: (Word,[Int]) -> TaskM (Word,Int)
 mrReducer (w,p) = 
