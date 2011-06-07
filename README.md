@@ -101,13 +101,13 @@ Here's the procedure, step by step.
         cfgHostName masterhost
         cfgKnownHosts masterhost slavehost1 slavehost2
 
-On `slavehost1`, create a file named `config` with the following content: 
+    On `slavehost1`, create a file named `config` with the following content: 
 
         cfgRole WORKER
         cfgHostName slavehost1
         cfgKnownHosts masterhost slavehost1 slavehost2
 
-On `slavehost2`, create a file named `config` with the following content: 
+    On `slavehost2`, create a file named `config` with the following content: 
 
         cfgRole WORKER
         cfgHostName slavehost2
