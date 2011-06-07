@@ -1,0 +1,143 @@
+This is **Cloud Haskell**. It's a framework for developing programs for a distributed computing environment. Basically, it's a tool for writing applications that coordinate their work on a cluster of commodity computers. It has two interfaces:
+
+* an interface based on message-passing between distributed processes. Think of it as Erlang (or MPI) in Haskell. We call this part the _process layer_. This file contains a brief introduction to this interface.
+* an automatically fault-tolerant data-centric interface. We call this part the _task layer_. This layer makes it easier to build distributed applications and takes care of a lot of the drudgery in dealing with hardware failures. This layer can be compared to Google's MapReduce but is in fact much more flexible; it's closer to Microsoft's Dryad. Proper documentation for this interface is pending.
+
+We suggest perusing the up-to-date Haddock documentation [here](http://www.cl.cam.ac.uk/~jee36/remote/). The [paper](http://www.cl.cam.ac.uk/~jee36/remote.pdf) is also useful.
+
+Introduction
+------------
+
+Many programming languages expose concurrent programming as a shared memory model, wherein multiple, concurrently executing programs, or threads, can examine and manipulate variables common to them all. Coordination between threads is achieved with locks, mutexes, and other synchronization mechanisms. In Haskell, these facilities are available as MVars.
+
+In contrast, languages like Erlang eschew shared data and require that concurrent threads communicate only by message-passing. The key insight of Erlang and languages like it is that reasoning about concurrency is much easier without shared memory. Under a message-passing scheme, a thread provides a  recipient, given as a thread identifier, and a unit of data; that data will be transferred to the recipient's address space and placed in a queue, where it can be retrieved by the recipient. Because data is never shared implicitly, this is a particularly good model for distributed systems.
+
+This framework presents a combined approach to distributed framework. While it provides an Erlang-style message-passing system, it lets the programmer use existing paradigms from Concurrent Haskell.
+
+Terminology
+-----------
+
+Location is represented by a _node_. Usually, a node corresponds to an instance of the Haskell runtime system; that is, each independently executed Haskell program exists in its own node. Multiple nodes may run concurrently on a single physical host system, but the intention is that nodes run on separate hosts, to take advantage of more hardware.
+
+The basic unit of concurrency is the _process_ (as distinct from the same term as used at the OS level, applied to an instance of an executing program). A process can be considered a thread with a message queue, and is implemented as a lightweight GHC forkIO thread. There is little overhead involved in starting and executing processes, so programmers can start as many as they need. Processes can send message to other processes and receive messages from them.
+
+The state associated with process management is wrapped up in the Haskell monad ProcesssM. All framework functions for managing and communicating with processes run in this monad, and most distributed user code will, as well.
+
+Process management
+------------------
+
+Processes are created with the `spawn` and `spawnLocal` functions. Their type signatures help explain their operation:
+
+```haskell
+spawn :: NodeId -> Closure (ProcessM ()) -> ProcessM ProcessId
+spawnLocal :: ProcessM () -> ProcessM ProcessId
+```
+
+`spawnLocal` takes a function in the `ProcessM` monad, starts it concurrently as a process on the same node as the caller, and gives a ProcessId that can be used to send messages to it. `spawn` works analogously, but also takes a `NodeId`, indicating where to run the process. This lets the programmer start arbitrary functions on other nodes, which may be running on other hosts. Actual code is not transmitted to the other node; instead, a function identifier is sent. This works on the assumption that all connected nodes are running identical copies of the compiled Haskell binary (unlike Erlang, which allows new code to be sent to remote nodes at runtime).
+
+We encode the function identifier used to start remote processes as a Closure. Closures may identify only top-level functions, without free variables. Since `spawn` is the only way to run a process on a remote node, functions run remotely cannot capture local mutable variables. This is the other key distinction between `spawn` and `spawnLocal`: processes run locally with `spawnLocal` share memory with each other, but processes started with `spawn` cannot (even if the target node is in fact the local node).
+
+The following code shows how local variable captures works with `spawnLocal`. There is no analogous code for `spawn`.
+
+```haskell
+do m <- liftIO $ newEmptyMVar
+   spawnLocal (liftIO $ putMVar m ())
+   liftIO $ takeMVar m
+```
+
+Whether a process is running locally or remotely, and whether or not it can share memory, sending messages to it works the same: the 
+`send` function, which corresponds to Erlang's ! operator.
+
+```haskell
+send :: (Serializable a) => ProcessId -> a -> ProcessM ()
+```
+
+Given a `ProcessId` (from `spawnLocal` or `spawn`) and a chunk of serializable data (implementing Haskell's `Data.Binary.Binary` type class), we can send a message to the given process. The message will transmitted across the network if necessary and placed in the process's message queue. Note that `send` will accept any type of data, as long as it implements Binary. Initially, all basic Haskell types implement binary, including tuples and arrays, and it's easy to implement Binary for user-defined types. How then does the receiving process know the type of message to extract from its queue? A message can receive processes by distinguishing their type using the `receiveWait` function, which corresponds to Erlang's `receive` clause. The process can provide a distinct handler for each type of process that it knows how to deal with; unmatched messages remain on the queue, where they may be retrieved by later invocations of `receiveWait`.
+
+Channels
+--------
+
+A _channel_ provides an alternative to message transmission with `send` and `receiveWait`. While `send` and `receiveWait` allow sending messages of any type, channels require messages to be of uniform type. Channels must be explicitly created with a call to `makeChannel`:
+
+```haskell
+newChannel :: (Serializable a) => ProcessM (SendPort a, ReceivePort a)
+```
+
+The resulting `SendPort` can be used with the `sendChannel` function to insert messages into the channel, and the `ReceivePort` can be used with 'rereceiveChannel'. The `SendChannel` can be serialized and sent as part of messages to other processes, which can then write to it; the `ReceiveChannel`, though, cannot be serialized, although it can be read from multiple threads on the same node by variable capture.
+
+Setup and walkthrough
+---------------------
+
+Here I'll provide a basic example of how to get started with your first project on this framework. 
+
+Here's the overall strategy: We'll be running a program that will estimate pi, making use of available computing resources potentially on remote systems. There will be an arbitrary number of nodes, one of which will be designated the master, and the remaining nodes will be slaves. The slaves will estimate pi in such a way that their results can be combined by the master, and an approximation will be output. The more nodes, and the longer they run, the more precise the output.
+
+In more detail: the master will assign each slave a region of the Halton sequence, and the slaves will use elements of the sequence to estimate the ratio of points in a unit square that fall within a unit circle, and that the master will sum these ratios. 
+
+Here's the procedure, step by step.
+
+1. Compile Pi6.hs. If you have the framework installed correctly, it should be sufficient to run:
+
+    ghc --make Pi6
+
+2. Select the machines you want to run the program on, and select one of them to be the master. All hosts must be connected on a local area network. For the purposes of this explanation, we'll assume that you will run your master node on a machine named `masterhost` and you will run two slave nodes each on machines named `slavehost1` and `slavehost2`.
+
+3. Copy the compiled executable Pi6 to some location on each of the three hosts.
+
+4. For each node, we need to create a configuration file. This is plain text file, usually named `config` and usually placed in the same directory with the executable. There are many possible settings that can be set in the configuration file, but only a few are necessary for this example; the rest have sensible defaults. On `masterhost`, create a file named `config` with the following content:
+
+    cfgRole MASTER
+    cfgHostName masterhost
+    cfgKnownHosts masterhost slavehost1 slavehost2
+
+On `slavehost1`, create a file named `config` with the following content: 
+
+    cfgRole SLAVE
+    cfgHostName slavehost1
+    cfgKnownHosts masterhost slavehost1 slavehost2
+
+On `slavehost2`, create a file named `config` with the following content: 
+
+    cfgRole SLAVE
+    cfgHostName slavehost2
+    cfgKnownHosts masterhost slavehost1 slavehost2
+
+A brief discussion of these settings and what they mean:
+
+The `cfgRole` setting determines the node's initial behavior. This is a string which is used to differentiate the two kinds of nodes in this example. More complex distributed systems might have more different kinds of roles. In this case, SLAVE nodes do nothing on startup, but just wait from a command from a master, whereas MASTER nodes seek out slave nodes and issue them commands.
+
+The `cfgHostName` setting indicates to each node the name of the host it's running on.
+
+The `cfgKnownHosts` setting provides a list of hosts that form part of this distributed execution. This is necessary so that the master node can find its subservient slave nodes.
+
+Taken together, these three settings tell each node (a) its own name, (b) the names of other nodes and (c) their behavioral relationship.
+
+5. Now, run the Pi6 program twice in each of the slave nodes. There should now be four slave nodes awaiting instructions.
+
+6. To start the execution, run Pi6 on the master node. You should see output like this:
+
+    2011-02-10 11:14:38.373856 UTC 0 pid://masterhost:48079/6/    SAY Starting...
+    2011-02-10 11:14:38.374345 UTC 0 pid://masterhost:48079/6/    SAY Telling slave nid://slavehost1:33716/ to look at range 0..1000000
+    2011-02-10 11:14:38.376479 UTC 0 pid://masterhost:48079/6/    SAY Telling slave nid://slavehost1:45343/ to look at range 1000000..2000000
+    2011-02-10 11:14:38.382236 UTC 0 pid://masterhost:48079/6/    SAY Telling slave nid://slavehost2:51739/ to look at range 2000000..3000000
+    2011-02-10 11:14:38.384613 UTC 0 pid://masterhost:48079/6/    SAY Telling slave nid://slavehost2:44756/ to look at range 3000000..4000000
+    2011-02-10 11:14:56.720435 UTC 0 pid://masterhost:48079/6/    SAY Done: 3141606141606141606141606141606141606141606141606141606141606141606141606141606141606141606141606141
+
+Let's talk about what's going on here.
+
+This output is generated by the framework's logging facility. Each line of output has the following fields, left-to-right: the date and time that the log entry was generated; the importance of the message (in this case 0); the process ID of the generating process; the subsystem or component that generated this message (in this case, SAY indicates that these messages were output by a call to the `say` function); and the body of the message. From these messages, we can see that the master node discovered four nodes running on two remote hosts; for each of them, the master emits a "Telling slave..." message. Note that although we had to specify the host names where the nodes were running in the config file, the master found all nodes running on each of those hosts. The log output also tells us which range of indices of the Halton sequence were assigned to each node. Each slave, having performed its calculation, sends its results back to the master, and when the master has received responses from all slaves, it prints out its estimate of pi and ends. The slave nodes continue running, waiting for another request. At this point, we could run the master again, or we can terminate the slaves manually with Ctrl-C or the kill command.
+
+Contributors
+------------
+
+I am grateful for the contributions of the following people to this project:
+ 
+* Alan Mycroft
+* Andrew P. Black
+* John Hughes 
+* John Launchbury 
+* Koen Claessen 
+* Simon Peyton-Jones
+* Thomas van Noort 
+* Warren Harris
+
