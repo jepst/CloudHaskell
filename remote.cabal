@@ -12,7 +12,7 @@ Build-Type:          Simple
 tested-with:         GHC ==6.12.1
 
 library
-  Build-Depends:       base >= 4, time, filepath, containers, network, syb, binary, mtl, bytestring, template-haskell, stm, pureMD5, utf8-string, directory
+  Build-Depends:       base >= 4, time, filepath, containers, network, syb, mtl, binary, bytestring, template-haskell, stm, pureMD5, utf8-string, directory
   ghc-options:         -Wall
   Extensions:          TemplateHaskell, FlexibleInstances, UndecidableInstances, CPP, ExistentialQuantification, DeriveDataTypeable
   Exposed-Modules:     Remote.Process, Remote.Encoding, Remote.Call, Remote.Reg, Remote.Peer, Remote.Init, Remote.Closure, Remote.Channel, Remote.Task, Remote

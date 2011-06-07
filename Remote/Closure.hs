@@ -6,7 +6,6 @@
 -- swapped out for the \"static\" mechanism described in the
 -- paper.
 module Remote.Closure (
-                       -- * Closure
                        Closure(..)
                        ) where
 

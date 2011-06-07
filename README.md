@@ -1,4 +1,7 @@
-This is **Cloud Haskell**. It's a Haskell framework for distributed applications. Basically, it's a tool for writing applications that coordinate their work on a cluster of commodity computers. This is useful for providing highly reliable, redundant, long-running services, as well as for building compute-intensive applications that can benefit from lots of hardware.
+Cloud Haskell
+=============
+
+This is **Cloud Haskell**. It's a Haskell framework for distributed applications. Basically, it's a tool for writing applications that coordinate their work on a cluster of commodity computers or virtual machines. This is useful for providing highly reliable, redundant, long-running services, as well as for building compute-intensive applications that can benefit from lots of hardware.
 
 Cloud Haskell has two interfaces:
 
@@ -7,7 +10,7 @@ Cloud Haskell has two interfaces:
 
 This file contains a (slightly out-of-date) introduction to the process layer. We're working on proper documentation for the task layer, but there are example programs included in the distribution.
 
-We suggest perusing the up-to-date Haddock documentation [here](http://www.cl.cam.ac.uk/~jee36/remote/). The [paper](http://www.cl.cam.ac.uk/~jee36/remote.pdf) is also useful.
+We suggest perusing the up-to-date Haddock [documentation](http://www.cl.cam.ac.uk/~jee36/remote/) and the [paper](http://www.cl.cam.ac.uk/~jee36/remote.pdf).
 
 Process layer: an introduction
 ------------------------------
@@ -50,6 +53,8 @@ I can run it on some node (and get its PID) like this:
 ```haskell
 pid <- spawn someNode (greet__closure "John Baptist")
 ```
+
+The `greet__closure` symbol here identifies a _closure generator_ and is automatically created by the framework from user-defined functions; see the examples or documentation for more details.
 
 You can send messages to a process with its PID. The `send` function corresponds to Erlang's ! operator.
 

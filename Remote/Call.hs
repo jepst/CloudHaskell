@@ -3,7 +3,6 @@
 -- | Provides Template Haskell-based tools
 -- and syntactic sugar for dealing with closures
 module Remote.Call (
--- * Compile-time metadata
          remotable,
          mkClosure,
          mkClosureRec,
@@ -81,43 +80,41 @@ mkClosureRec name =
 --
 -- 1. First, enable Template Haskell in the module:
 --
--- > {-# LANGUAGE TemplateHaskell #-}
--- > module Main where
--- > import Remote.Call (remotable)
--- >    ...
+--   > {-# LANGUAGE TemplateHaskell #-}
+--   > module Main where
+--   > import Remote.Call (remotable)
+--   >    ...
 --
--- 2. Define your functions normally. Restrictions: function's type signature must be explicitly declared; no polymorphism; all parameters must be Serializable; return value must be pure, or in one of the 'ProcessM', 'TaskM', or 'IO' monads; probably other restrictions as well.
+-- 2. Define your functions normally. Restrictions: function's type signature must be explicitly declared; no polymorphism; all parameters must implement Serializable; return value must be pure, or in one of the 'ProcessM', 'TaskM', or 'IO' monads; probably other restrictions as well.
 --
--- > greet :: String -> ProcessM ()
--- > greet name = say ("Hello, "++name)
--- > badFac :: Integer -> Integer
--- > badFac 0 = 1
--- > badFac 1 = 1
--- > badFac n = badFac (n-1) + badFac (n-2)
+--   > greet :: String -> ProcessM ()
+--   > greet name = say ("Hello, "++name)
+--   > badFib :: Integer -> Integer
+--   > badFib 0 = 1
+--   > badFib 1 = 1
+--   > badFib n = badFib (n-1) + badFib (n-2)
 --
--- 3. Automagically generate stubs and closures for your functions like this:
+-- 3. Use the 'remotable' function to automagically generate stubs and closure generators for your functions:
 --
--- > $( remotable ['greet, 'badFac] )
+--   > $( remotable ['greet, 'badFib] )
 --
--- 'remotable' may be used only once per module.
+--   'remotable' may be used only once per module.
 --
--- 4. When you call 'remoteInit' (usually the first thing in your main function), 
+-- 4. When you call 'remoteInit' (usually the first thing in your program), 
 -- be sure to give it the automagically generated function lookup tables
 -- from all modules that use 'remotable':
 --
--- > main = remoteInit (Just "config") [Main.__remoteCallMetaData, OtherModule.__remoteCallMetaData] initialProcess
+--   > main = remoteInit (Just "config") [Main.__remoteCallMetaData, OtherModule.__remoteCallMetaData] initialProcess
 --
 -- 5. Now you can invoke your functions remotely. When a function expects a closure, give it the name
 -- of the generated closure, rather than the name of the original function. If the function takes parameters,
--- so will the closure.
+-- so will the closure. To start the @greet@ function on @someNode@:
 --
--- To start the @greet@ function on @someNode@:
+--   > spawn someNode (greet__closure "John Baptist")
 --
--- > spawn someNode (greet__closure "John Baptist")
+-- Note that we say @greet__closure@ rather than just @greet@. If you prefer, you can use 'mkClosure' instead, i.e. @$(mkClosure 'greet)@, which will expand to @greet__closure@. To calculate a Fibonacci number remotely:
 --
--- Note that we say @greet__closure@ rather than just @greet@. If you prefer, you can use 'mkClosure' instead, i.e. @$(mkClosure 'greet)@, which will expand to @greet_closure@. To calculate a factorial remotely:
---
--- > val <- callRemotePure someNode (badFac__closure 5)
+-- > val <- callRemotePure someNode (badFib__closure 5)
 remotable :: [Name] -> Q [Dec]
 remotable names =
     do info <- liftM concat $ mapM getType names 
