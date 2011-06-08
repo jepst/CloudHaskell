@@ -1869,8 +1869,10 @@ startProcessRegistry = serviceThread ServiceProcessRegistry (service initialStat
                           case islocal of
                              True -> 
                                do mypid <- getSelfPid
-                                  monitorProcessQuiet mypid pid MaMonitor
-                                  return (ProcessRegistryResponse Nothing,ProcessRegistryState newNameToPid newPidToName)
+                                  ok <- monitorProcessQuiet mypid pid MaMonitor
+                                  case ok of
+                                    True -> return (ProcessRegistryResponse Nothing,ProcessRegistryState newNameToPid newPidToName)
+                                    False -> return (ProcessRegistryError $ "Couldn't establish monitoring of task in naming "++name,state)
                              False -> return (ProcessRegistryError $ "Refuse to register nonlocal process" ++ show pid,state)
                 (Nothing,_) -> return (ProcessRegistryError $ "The name "++name++" has already been registered",state)
                 (_,_) -> return (ProcessRegistryError $ "The process "++show pid++" has already been registered",state)
@@ -1922,8 +1924,33 @@ nameQuery nid name =
 -- name may be given to only one node. If this function is called
 -- more than once by the same process, or called more than once
 -- with the name on a single node, it will throw a 'ServiceException'.
--- The name can be queried later with 'nameQuery'. When the
+-- The PID of a named process can be queried later with 'nameQuery'. When the
 -- named process ends, its name will again become available.
+-- One reason to use named processes is to create node-local state.
+-- This example lets each node have its own favorite color, which can
+-- be changed and queried.
+--
+-- > nodeFavoriteColor :: ProcessM ()
+-- > nodeFavoriteColor =
+-- >  do nameSet "favorite_color"
+-- >     loop Blue
+-- >  where loop color =
+-- >      receiveWait
+-- >         [ match (\newcolor -> return newcolor),
+-- >           match (\pid -> send pid color >> return color)
+-- >         ] >>= loop
+-- >
+-- > setFavoriteColor :: NodeId -> Color -> ProcessM ()
+-- > setFavoriteColor nid color =
+-- >  do (Just pid) <- nameQuery nid "favorite_color"
+-- >     send pid color
+-- >
+-- > getFavoriteColor :: NodeId -> ProcessM Color
+-- > getFavoriteColor nid =
+-- >  do (Just pid) <- nameQuery nid "favorite_color"
+-- >     mypid <- getSelfPid
+-- >     send pid mypid
+-- >     expect
 nameSet :: String -> ProcessM ()
 nameSet name = 
   do mynid <- getSelfNode
