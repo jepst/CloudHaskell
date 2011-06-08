@@ -27,6 +27,9 @@ module Remote.Process  (
                        UnknownMessageException(..),ServiceException(..),
                        TransmitException(..),TransmitStatus(..),
 
+                       -- * Process naming
+                       nameSet, nameQuery, nameQueryOrStart,
+
                        -- * Process spawning and monitoring
                        spawnLocal,spawnLocalAnd,forkProcess,spawn,spawnAnd,spawnLink,unpause,
                        AmSpawnOptions(..),defaultSpawnOptions,MonitorAction(..),SignalReason(..),
@@ -57,7 +60,7 @@ module Remote.Process  (
 
                        -- * System service processes, not for general use
                        startSpawnerService, startLoggingService, startProcessMonitorService, startLocalRegistry, startFinalizerService,
-                       startNodeMonitorService, standaloneLocalRegistry
+                       startNodeMonitorService, startProcessRegistry, standaloneLocalRegistry
                        )
                        where
 
@@ -1748,6 +1751,7 @@ data ServiceId =
                | ServiceNodeRegistry 
                | ServiceNodeMonitor 
                | ServiceProcessMonitor 
+               | ServiceProcessRegistry
                  deriving (Ord,Eq,Enum,Show)
 
 adminGetPid :: NodeId -> ServiceId -> ProcessId
@@ -1809,6 +1813,130 @@ serviceThread v f = spawnLocalAnd (pbracket (return ())
                              (\_ -> f)) (adminRegister v >> setDaemonic)
                         >> (return()) 
           where logError = logS "SYS" LoFatal $ "System process "++show v++" has terminated" -- TODO maybe restart?
+
+
+----------------------------------------------
+-- * Process registry service 
+----------------------------------------------
+
+
+data ProcessRegistryState = ProcessRegistryState (Map.Map String ProcessId) (Map.Map ProcessId String)
+
+data ProcessRegistryCommand = ProcessRegistryQuery String (Maybe (Closure (ProcessM ())))
+                            | ProcessRegistrySet String ProcessId deriving (Typeable)
+instance Binary ProcessRegistryCommand where
+  put (ProcessRegistryQuery a b) = putWord8 0 >> put a >> put b
+  put (ProcessRegistrySet a b) = putWord8 1 >> put a >> put b
+  get = do a <- getWord8
+           case a of
+             0 -> do a <- get
+                     b <- get
+                     return $ ProcessRegistryQuery a b
+             1 -> do a <- get
+                     b <- get
+                     return $ ProcessRegistrySet a b
+data ProcessRegistryAnswer = ProcessRegistryResponse (Maybe ProcessId)
+                           | ProcessRegistryError String deriving (Typeable)
+instance Binary ProcessRegistryAnswer where
+  put (ProcessRegistryResponse a) = putWord8 0 >> put a
+  put (ProcessRegistryError s) = putWord8 1 >> put s
+  get = do a <- getWord8
+           case a of
+             0 -> get >>= (return . ProcessRegistryResponse)
+             1 -> get >>= (return . ProcessRegistryError)
+
+startProcessRegistry :: ProcessM ()
+startProcessRegistry = serviceThread ServiceProcessRegistry (service initialState)
+  where
+    initialState = ProcessRegistryState Map.empty Map.empty
+    service state@(ProcessRegistryState nameToPid pidToName) = 
+      let
+        downs (ProcessMonitorException pid why) =
+          case Map.lookup pid pidToName of
+            Just name ->
+              let newPidToName = Map.delete pid pidToName
+                  newNameToPid = Map.delete name nameToPid
+               in return (ProcessRegistryState newNameToPid newPidToName)
+            Nothing -> return state
+        cmds cmd = 
+          case cmd of
+            ProcessRegistrySet name pid ->
+              case (Map.lookup pid pidToName, Map.lookup name nameToPid) of
+                (Nothing,Nothing) -> 
+                   let newNameToPid = Map.insert name pid nameToPid
+                       newPidToName = Map.insert pid name pidToName
+                    in do islocal <- isPidLocal pid
+                          case islocal of
+                             True -> 
+                               do mypid <- getSelfPid
+                                  monitorProcessQuiet mypid pid MaMonitor
+                                  return (ProcessRegistryResponse Nothing,ProcessRegistryState newNameToPid newPidToName)
+                             False -> return (ProcessRegistryError $ "Refuse to register nonlocal process" ++ show pid,state)
+                (Nothing,_) -> return (ProcessRegistryError $ "The name "++name++" has already been registered",state)
+                (_,_) -> return (ProcessRegistryError $ "The process "++show pid++" has already been registered",state)
+            ProcessRegistryQuery name clo ->
+              case Map.lookup name nameToPid of
+                Just pid -> return (ProcessRegistryResponse (Just pid),state)
+                Nothing -> 
+                  case clo of
+                    Nothing -> return (ProcessRegistryResponse Nothing,state)
+                    Just clo -> do mynid <- getSelfNode
+                                   mypid <- getSelfPid
+                                   pid <- spawnAnd mynid clo defaultSpawnOptions {amsoMonitor=Just (mypid,MaMonitor)}
+                                   let newNameToPid = Map.insert name pid nameToPid
+                                       newPidToName = Map.insert pid name pidToName
+                                   return (ProcessRegistryResponse (Just pid),ProcessRegistryState newNameToPid newPidToName)
+       in receiveWait [roundtripResponse cmds,match downs] >>= service
+
+
+-- TODO nameQueryOrWait :: NodeId -> String -> ProcessM ProcessId
+
+-- | Similar to 'nameQuery' but if the named process doesn't exist,
+-- it will be started from the given closure. If the process is
+-- already running, the closure will be ignored.
+nameQueryOrStart :: NodeId -> String -> Closure (ProcessM ()) -> ProcessM ProcessId
+nameQueryOrStart nid name clo =
+  let servicepid = adminGetPid nid ServiceProcessRegistry
+      msg = ProcessRegistryQuery name (Just clo)
+   in do res <- roundtripQueryUnsafe PldAdmin servicepid msg
+         case res of
+            Right (ProcessRegistryResponse (Just answer)) -> return answer
+            Right (ProcessRegistryError s) -> throw $ ServiceException s
+            _ -> throw $ ServiceException $ "Crazy talk from process registry"
+
+-- | Query the PID of a named process on a particular node.
+-- If no process of that name exists, or if that
+-- process has ended, this function returns Nothing.
+nameQuery :: NodeId -> String -> ProcessM (Maybe ProcessId)
+nameQuery nid name =
+  let servicepid = adminGetPid nid ServiceProcessRegistry
+      msg = ProcessRegistryQuery name Nothing
+   in do res <- roundtripQueryUnsafe PldAdmin servicepid msg
+         case res of
+            Right (ProcessRegistryResponse answer) -> return answer
+            Right (ProcessRegistryError s) -> throw $ ServiceException s
+            _ -> throw $ ServiceException $ "Crazy talk from process registry"
+
+-- | Assigns a name to the current process. The name is local to the
+-- node. On each node, each process may have only one name, and each
+-- name may be given to only one node. If this function is called
+-- more than once by the same process, or called more than once
+-- with the name on a single node, it will throw a 'ServiceException'.
+-- The name can be queried later with 'nameQuery'. When the
+-- named process ends, its name will again become available.
+nameSet :: String -> ProcessM ()
+nameSet name = 
+  do mynid <- getSelfNode
+     mypid <- getSelfPid
+     let servicepid = adminGetPid mynid ServiceProcessRegistry
+         msg = ProcessRegistrySet name mypid
+     res <- roundtripQueryLocal PldAdmin servicepid msg
+     case res of
+        Right (ProcessRegistryResponse Nothing) -> return ()
+        Right (ProcessRegistryError s) -> throw $ ServiceException s
+        _ -> throw $ ServiceException $ "Crazy talk from process registry"
+
+
 
 
 ----------------------------------------------
@@ -2052,24 +2180,35 @@ withMonitoring pid how f =
 -- If the monitee is not currently running, the monitor will be signalled immediately.
 -- See also 'MonitorAction'.
 monitorProcess :: ProcessId -> ProcessId -> MonitorAction -> ProcessM ()
-monitorProcess monitor monitee how = monitorProcessImpl GlMonitor monitor monitee how 
+monitorProcess monitor monitee how = monitorProcessImpl GlMonitor monitor monitee how True >> return ()
 
 -- | Removes monitoring established by 'monitorProcess'. Note that the type of
 -- monitoring, given in the third parameter, must match in order for monitoring
 -- to be removed. If monitoring has not already been established between these
 -- two processes, this function takes not action.
 unmonitorProcess :: ProcessId -> ProcessId -> MonitorAction -> ProcessM ()
-unmonitorProcess monitor monitee how = monitorProcessImpl GlUnmonitor monitor monitee how 
+unmonitorProcess monitor monitee how = monitorProcessImpl GlUnmonitor monitor monitee how True >> return ()
 
-monitorProcessImpl :: (ProcessId -> ProcessId -> MonitorAction -> GlCommand) -> ProcessId -> ProcessId -> MonitorAction -> ProcessM ()
-monitorProcessImpl msgtype monitor monitee how = 
+monitorProcessQuiet :: ProcessId -> ProcessId -> MonitorAction -> ProcessM Bool
+monitorProcessQuiet monitor monitee how = 
+  do res <- monitorProcessImpl GlMonitor monitor monitee how False
+     case res of
+       QteOK -> return True
+       _ -> return False
+
+monitorProcessImpl :: (ProcessId -> ProcessId -> MonitorAction -> GlCommand) -> ProcessId -> ProcessId -> MonitorAction -> Bool -> ProcessM TransmitStatus
+monitorProcessImpl msgtype monitor monitee how throwit = 
      let msg = msgtype monitor monitee how
       in do let servicepid = (adminGetPid (nodeFromPid monitee) ServiceProcessMonitor) 
             res <- roundtripQueryUnsafe PldAdmin servicepid msg -- TODO: Prefer to send this message to the local service
             case res of
-              Right QteOK -> return ()
-              err -> herr err
-         where herr err = throw $ ServiceException $ "Error when monitoring process " ++ show monitee ++ ": " ++ show err
+              Right QteOK -> return QteOK
+              Right err -> herr err
+              Left err -> herr err
+  where herr err = 
+            case throwit of
+              True -> throw $ ServiceException $ "Error when monitoring process " ++ show monitee ++ ": " ++ show err
+              False -> return err
 
 sendInterrupt :: (Exception e) => ProcessId -> e -> ProcessM Bool
 sendInterrupt pid e = do islocal <- isPidLocal pid
@@ -2256,17 +2395,19 @@ data AmSpawnOptions = AmSpawnOptions
         { 
           amsoPaused :: Bool,
           amsoLink :: Maybe ProcessId,
-          amsoMonitor :: Maybe (ProcessId,MonitorAction)
+          amsoMonitor :: Maybe (ProcessId,MonitorAction),
+          amsoName :: Maybe String
         } deriving (Typeable) 
 instance Binary AmSpawnOptions where
-    put (AmSpawnOptions a b c) = put a >> put b >> put c
+    put (AmSpawnOptions a b c d) = put a >> put b >> put c >> put d
     get = do a <- get
              b <- get
              c <- get
-             return $ AmSpawnOptions a b c
+             d <- get
+             return $ AmSpawnOptions a b c d
 
 defaultSpawnOptions :: AmSpawnOptions
-defaultSpawnOptions = AmSpawnOptions {amsoPaused=False, amsoLink=Nothing, amsoMonitor=Nothing}
+defaultSpawnOptions = AmSpawnOptions {amsoPaused=False, amsoLink=Nothing, amsoMonitor=Nothing, amsoName=Nothing}
 
 data AmSpawnUnpause = AmSpawnUnpause deriving (Typeable)
 instance Binary AmSpawnUnpause where
@@ -2359,6 +2500,9 @@ startSpawnerService = serviceThread ServiceSpawner spawner
                (\cmd -> case cmd of
                     AmSpawn c opt -> 
                       let 
+                        namePostlude = case amsoName opt of
+                                         Nothing -> return ()
+                                         Just name -> nameSet name
                         pausePrelude = case amsoPaused opt of
                                             False -> return ()
                                             True -> receiveWait [match (\AmSpawnUnpause -> return ())]
@@ -2368,8 +2512,9 @@ startSpawnerService = serviceThread ServiceSpawner spawner
                         monitorPostlude = case amsoMonitor opt of
                                             Nothing -> return ()
                                             Just (pid,ma) -> do mypid <- getSelfPid
-                                                                monitorProcess pid mypid ma
-                      in do newpid <- spawnLocalAnd (pausePrelude >> spawnWorker c) (linkPostlude >> monitorPostlude)
+                                                                monitorProcessQuiet pid mypid ma
+                                                                return ()
+                      in do newpid <- spawnLocalAnd (pausePrelude >> spawnWorker c) (namePostlude >> linkPostlude >> monitorPostlude)
                             return (newpid,()))
 
 

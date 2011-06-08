@@ -30,6 +30,8 @@ module Remote ( -- * The process layer
                 UnknownMessageException(..), ServiceException(..), 
                 TransmitException(..), TransmitStatus(..),
 
+                nameSet, nameQuery, nameQueryOrStart,
+
                 linkProcess, monitorProcess, unmonitorProcess,
                 withMonitor, MonitorAction(..),
                 ProcessMonitorException(..),

@@ -26,22 +26,22 @@ Nodes and processes
 
 Location is represented by a _node_. Usually, a node corresponds to an instance of the Haskell runtime system; that is, each independently executed Haskell program exists in its own node. Multiple nodes may run concurrently on a single physical host system, but the intention is that nodes run on separate hosts, to take advantage of more hardware.
 
-The basic unit of concurrency is the _process_ (as distinct from the same term as used at the OS level). A process is a concurrent calculation that can be participate in messaging. There is little overhead involved in starting and executing processes, so programmers can start as many as they need. 
+The basic unit of concurrency is the _process_ (as distinct from an OS process). A process is a concurrent calculation that can  participate in messaging. There is little overhead involved in starting and executing processes, so programmers can start as many as they need. 
 
 Code that runs in a process is in the `ProcessM` monad.
 
 Process management
 ------------------
 
-Processes are created with the `spawn` function. Its type signatures help explain its operation:
+Processes are created with the `spawn` function. Its type signatures will help explain its operation:
 
 ```haskell
 spawn :: NodeId -> Closure (ProcessM ()) -> ProcessM ProcessId
 ```
 
-`spawn` works analogously takes a `NodeId`, indicating where to run the process, and a `Closure`, indicating which function to use to start the process. This lets the programmer start arbitrary functions on other nodes, which may be running on other hosts. Actual code is not transmitted to the other node; instead, a function identifier is sent. This works on the assumption that all connected nodes are running identical copies of the compiled Haskell binary (unlike Erlang, which allows new code to be sent to remote nodes at runtime).
+`spawn` takes a `NodeId`, indicating where to run the process, and a `Closure`, indicating which function will start the process. This lets the programmer start arbitrary functions on other nodes, which may be running on other hosts. Actual code is not transmitted to the other node; instead, a function identifier is sent. This works on the assumption that all connected nodes are running identical copies of the compiled Haskell binary (unlike Erlang, which allows new code to be sent to remote nodes at runtime).
 
-We encode the function identifier used to start remote processes as a `Closure`. Closures for remotely-callable functions are automatically generated, and named after the original function with a `__closure` suffix. Therefore, if I have a function like this:
+We encode the function identifier used to start remote processes in a `Closure`. Closures for remotely-callable functions are automatically generated, and are named after the original function with a `__closure` suffix. Therefore, if I have a function like this:
 
 ```haskell
 greet :: String -> ProcessM ()
@@ -56,35 +56,37 @@ pid <- spawn someNode (greet__closure "John Baptist")
 
 The `greet__closure` symbol here identifies a _closure generator_ and is automatically created by the framework from user-defined functions; see the examples or documentation for more details.
 
-You can send messages to a process with its PID. The `send` function corresponds to Erlang's ! operator.
+You can send messages to a process given its PID. The `send` function corresponds to Erlang's ! operator.
 
 ```haskell
 send :: (Serializable a) => ProcessId -> a -> ProcessM ()
 ```
 
-Given a `ProcessId` and a chunk of serializable data (implementing the `Data.Binary.Binary` type class), we can send a message to the given process. The message will transmitted across the network if necessary and placed in the process's message queue. Note that `send` will accept any type of data, as long as it implements Binary. A process can receive messages by calling `expect`:
+Given a `ProcessId` and a chunk of serializable data (implementing the `Data.Binary.Binary` type class), we can send a message to the given process. The message will be transmitted across the network if necessary and placed in the process's message queue. Note that `send` will accept any type of data, as long as it implements Binary.
+
+A process can receive messages by calling `expect`:
 
 ```haskell
 expect :: (Serializable a) => ProcessM a
 ```
 
-Note that `expect` is also polymorphic; the type of message to receive is usually inferred by the compiler.
+Note that `expect` is also polymorphic; the type of message to receive is usually inferred by the compiler. If a message of that type is in the queue, it will be returned. If multiple messages of that type are in the queue, they will be returned in FIFO order. If there are no messages of that type in the queue, the function will block until such a message arrives.
 
 Channels
 --------
 
-A _channel_ provides an alternative to message transmission with `send` and `expect`. While `send` and `expect` allow transmission of messages of any type, channels require messages to be of uniform type. Channels work like a distributed equivalent of Haskell's `Control.Concurrent.Chan`. Unlike regular channels, distributed channels have distinct ends: a receiving port and perhaps multiple sending ports. Create a channel with a call to `newChannel`:
+A _channel_ provides an alternative to message transmission with `send` and `expect`. While `send` and `expect` allow transmission of messages of any type, channels require messages to be of uniform type. Channels work like a distributed equivalent of Haskell's `Control.Concurrent.Chan`. Unlike regular channels, distributed channels have distinct ends: a single receiving port and at least one sending port. Create a channel with a call to `newChannel`:
 
 ```haskell
 newChannel :: (Serializable a) => ProcessM (SendPort a, ReceivePort a)
 ```
 
-The resulting `SendPort` can be used with the `sendChannel` function to insert messages into the channel, and the `ReceivePort` can be used with 'rereceiveChannel'. The `SendChannel` can be serialized and sent as part of messages to other processes, which can then write to it; the `ReceiveChannel`, though, cannot be serialized, although it can be read from multiple threads on the same node.
+The resulting `SendPort` can be used with the `sendChannel` function to insert messages into the channel. The `ReceivePort` can be used to receive messages with 'receiveChannel'. The `SendChannel` can be serialized and sent as part of messages to other processes, which can then write to it; the `ReceiveChannel`, though, cannot be serialized, although it can be accessed from multiple threads on the same node.
 
 Setup and walkthrough
 ---------------------
 
-Here we'll provide a basic example of how to get started with your first project on this framework. 
+Here we'll provide a basic example of how to get started with your first project. 
 
 We'll be running a program that will estimate pi, making use of available computing resources potentially on remote systems. There will be an arbitrary number of nodes, one of which will be designated the master, and the remaining nodes will be slaves. The slaves will estimate pi in such a way that their results can be combined by the master, and an approximation will be output. The more nodes, and the longer they run, the more precise the output.
 
@@ -100,7 +102,7 @@ Here's the procedure, step by step.
 
 3. Copy the compiled executable Pi6 to some location on each of the three hosts.
 
-4. For each node, we need to create a configuration file. This is plain text file, usually named `config` and usually placed in the same directory with the executable. There are many possible settings that can be set in the configuration file, but only a few are necessary for this example; the rest have sensible defaults. On `masterhost`, create a file named `config` with the following content:
+4. For each node, we need to create a configuration file. This is plain text file, usually named `config` and usually placed in the same directory with the executable. There are many possible settings that can be given in the configuration file, but only a few are necessary for this example; the rest have sensible defaults. On `masterhost`, create a file named `config` with the following content:
 
         cfgRole MASTER
         cfgHostName masterhost

@@ -5,7 +5,7 @@ module Remote.Init (remoteInit) where
 
 import Remote.Peer (startDiscoveryService)
 import Remote.Task (__remoteCallMetaData)
-import Remote.Process (suppressTransmitException,pbracket,localRegistryRegisterNode,localRegistryHello,localRegistryUnregisterNode,
+import Remote.Process (startProcessRegistry,suppressTransmitException,pbracket,localRegistryRegisterNode,localRegistryHello,localRegistryUnregisterNode,
                        startProcessMonitorService,startNodeMonitorService,startLoggingService,startSpawnerService,ProcessM,readConfig,initNode,startLocalRegistry,
                        forkAndListenAndDeliver,waitForThreads,roleDispatch,Node,runLocalProcess,performFinalization,startFinalizerService)
 import Remote.Reg (registerCalls,RemoteCallMetaData)
@@ -20,6 +20,7 @@ import Control.Concurrent.MVar (MVar,takeMVar,putMVar,newEmptyMVar)
 startServices :: ProcessM ()
 startServices = 
            do
+              startProcessRegistry
               startNodeMonitorService
               startProcessMonitorService
               startLoggingService
