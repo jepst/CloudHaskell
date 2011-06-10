@@ -53,10 +53,10 @@ module Remote.Process  (
                        -- * Various internals, not for general use
                        PortId,LocalProcessId,
                        localRegistryHello,localRegistryRegisterNode, localRegistryQueryNodes,localRegistryUnregisterNode,
-                       sendSimple,makeNodeFromHost,getNewMessageLocal, getProcess,Message,msgPayload,Process,prNodeRef,
+                       sendSimple,makeNodeFromHost,getNewMessageLocal, getProcess,Message,Process,prNodeRef,
                        roundtripResponse,roundtripResponseAsync,roundtripQuery,roundtripQueryMulti,
                        makePayloadClosure,getLookup,diffTime,roundtripQueryImpl,roundtripQueryUnsafe,
-                       PayloadDisposition(..),suppressTransmitException,Node,
+                       PayloadDisposition(..),suppressTransmitException,Node,getMessagePayload,getMessageType,
 
                        -- * System service processes, not for general use
                        startSpawnerService, startLoggingService, startProcessMonitorService, startLocalRegistry, startFinalizerService,
@@ -84,7 +84,7 @@ import Network (HostName,PortID(..),PortNumber,listenOn,accept,sClose,connectTo,
 import Network.Socket (PortNumber(..),setSocketOption,SocketOption(..),socketPort,aNY_PORT )
 import qualified Data.Map as Map (Map,keys,fromList,unionWith,elems,singleton,member,update,empty,adjust,alter,insert,delete,lookup,toList,size,insertWith')
 import Remote.Reg (getEntryByIdent,Lookup,empty)
-import Remote.Encoding (serialEncode,serialDecode,serialEncodePure,serialDecodePure,Payload,Serializable,PayloadLength,genericPut,genericGet,hPutPayload,hGetPayload,payloadLength,getPayloadType)
+import Remote.Encoding (serialEncode,serialDecode,serialEncodePure,serialDecodePure,dynamicEncodePure,dynamicDecodePure,DynamicPayload,Payload,Serializable,PayloadLength,genericPut,genericGet,hPutPayload,hGetPayload,payloadLength,getPayloadType,getDynamicPayloadType)
 import System.Environment (getArgs)
 import qualified System.Timeout (timeout)
 import Data.Time (toModifiedJulianDay,Day(..),picosecondsToDiffTime,getCurrentTime,diffUTCTime,UTCTime(..),utcToLocalZonedTime)
@@ -208,12 +208,36 @@ data PayloadDisposition = PldUser |
                           PldAdmin
                           deriving (Typeable,Read,Show,Eq)
 
-data Message = Message
-   {
-       msgDisposition :: PayloadDisposition,
-       msgHeader :: Maybe Payload,
-       msgPayload :: !Payload
-   }
+data Message = 
+   EncodedMessage { msgEDisposition :: PayloadDisposition, msgEHeader :: Maybe Payload, msgEPayload :: !Payload }
+ | DynamicMessage { msgDDisposition :: PayloadDisposition, msgDHeader :: Maybe DynamicPayload, msgDPayload :: DynamicPayload }
+
+makeMessage :: (Serializable msg, Serializable hdr) => Bool -> PayloadDisposition -> msg -> Maybe hdr -> Message
+makeMessage True pld msg hdr = 
+   DynamicMessage {msgDDisposition=pld,msgDHeader=maybe Nothing (Just . dynamicEncodePure) hdr, msgDPayload=dynamicEncodePure msg}
+makeMessage False pld msg hdr = 
+   EncodedMessage {msgEDisposition=pld,msgEHeader=maybe Nothing (Just . serialEncodePure) hdr,msgEPayload=serialEncodePure msg}
+
+getMessageType :: Message -> String
+getMessageType (EncodedMessage _ _ a) = getPayloadType a
+getMessageType (DynamicMessage _ _ a) = getDynamicPayloadType a
+
+getMessagePayload :: (Serializable a) => Message -> Maybe a
+getMessagePayload (EncodedMessage _ _ a) = serialDecodePure a
+getMessagePayload (DynamicMessage _ _ a) = dynamicDecodePure a
+
+messageHasHeader :: Message -> Bool
+messageHasHeader (EncodedMessage _ (Just _) _) = True
+messageHasHeader (DynamicMessage _ (Just _) _) = True
+messageHasHeader _ = False
+
+getMessageHeader :: (Serializable a) => Message -> Maybe a
+getMessageHeader (EncodedMessage _ a _) = maybe Nothing serialDecodePure a
+getMessageHeader (DynamicMessage _ a _) = maybe Nothing dynamicDecodePure a
+
+getMessageDisposition :: Message -> PayloadDisposition
+getMessageDisposition (EncodedMessage a _ _) = a
+getMessageDisposition (DynamicMessage a _ _) = a
 
 data ProcessTableEntry = ProcessTableEntry
   {
@@ -476,7 +500,7 @@ matchUnknown body = returnHalt () body
 -- > matchUnknown (throw (UnknownMessageException "..."))
 matchUnknownThrow :: MatchM q ()
 matchUnknownThrow = do mb <- getMatch
-                       returnHalt () (throw $ UnknownMessageException (getPayloadType $ msgPayload (mbMessage mb)))
+                       returnHalt () (throw $ UnknownMessageException (getMessageType (mbMessage mb)))
 
 -- | Used to specify a message pattern in 'receiveWait' and related functions.
 -- Only messages containing data of type /a/, where /a/ is the argument to the user-provided
@@ -503,8 +527,8 @@ matchCore cond body =
  where 
   doit mb = 
         let    
-           decodified = serialDecodePure (msgPayload (mbMessage mb))
-           decodifiedh = maybe (Nothing) (serialDecodePure) (msgHeader (mbMessage mb))
+           decodified = getMessagePayload (mbMessage mb)
+           decodifiedh = getMessageHeader (mbMessage mb)
         in decodified `seq` decodifiedh `seq`
             case decodified of
               Just x -> if cond (x,decodifiedh) 
@@ -916,19 +940,15 @@ sendTry pid msg msghdr pld = getProcess >>= (\p ->
 sendBasic :: (Serializable a,Serializable b) => MVar Node -> ProcessId -> a -> Maybe b -> PayloadDisposition -> Maybe (IORef (Map.Map NodeId Handle)) -> IO TransmitStatus
 sendBasic mnode pid msg msghdr pld pool = do
               nid <- getNodeId mnode
-              encoding <- liftIO $ serialEncode msg
-              header <- maybe (return Nothing) (\x -> do t <- liftIO $ serialEncode x
-                                                         return $ Just t) msghdr
-              let themsg = Message {msgDisposition=pld,msgHeader = header,msgPayload=encoding}
-                       -- TODO allow an alternate, nonserialized format of message (using Dynamic) for local transmissions
               let islocal = nodeFromPid pid == nid
+              let themsg = makeMessage islocal pld msg msghdr
               (if islocal then sendRawLocal else sendRawRemote) mnode pid nid themsg pool
 
 sendRawLocal :: MVar Node -> ProcessId -> NodeId -> Message -> Maybe (IORef (Map.Map NodeId Handle)) -> IO TransmitStatus
 sendRawLocal noderef thepid nodeid msg _
      | thepid == nullPid = return QteUnknownPid
      | otherwise = do cfg <- getConfigI noderef
-                      messageHandler cfg noderef (msgDisposition msg) msg (cfgNetworkMagic cfg) (localFromPid thepid)
+                      messageHandler cfg noderef (getMessageDisposition msg) msg (cfgNetworkMagic cfg) (localFromPid thepid)
 
 sendRawRemote :: MVar Node -> ProcessId -> NodeId -> Message -> Maybe (IORef (Map.Map NodeId Handle)) -> IO TransmitStatus
 sendRawRemote noderef thepid nodeid msg (Just pool) =
@@ -983,23 +1003,24 @@ sendRawRemoteImpl noderef thepid@(ProcessId (NodeId hostname portid) localpid) n
                         return (ret,Just h)
     
 writeMessage :: Handle -> (String,LocalProcessId,NodeId,Message)-> IO TransmitStatus
-writeMessage h (magic,dest,nodeid,msg) = 
-         do hPutStrZ h $ unwords ["Rmt!!",magic,show dest,show (msgDisposition msg),show fmt,show nodeid]
+writeMessage h (magic,dest,nodeid,(EncodedMessage msgDisp msgHdr msgMsg)) = 
+         do hPutStrZ h $ unwords ["Rmt!!",magic,show dest,show msgDisp,show fmt,show nodeid]
             hFlush h
             response <- hGetLineZ h
             resp <- readIO response :: IO TransmitStatus
             case resp of
-               QtePleaseSendBody -> do maybe (return ()) (hPutPayload h) (msgHeader msg)
-                                       hPutPayload h $ msgPayload msg
+               QtePleaseSendBody -> do maybe (return ()) (hPutPayload h) (msgHdr)
+                                       hPutPayload h msgMsg
                                        hFlush h
                                        response2 <- hGetLineZ h
                                        resp2 <- readIO response2 :: IO TransmitStatus
                                        return resp2
                QteOK -> return QteBadFormat
                n -> return n                
-         where fmt = case msgHeader msg of
+         where fmt = case msgHdr of
                         Nothing -> (0::Int)
                         Just _ -> 2
+writeMessage _ _ = throw $ ServiceException "writeMessage went down wrong pipe"
 
 ----------------------------------------------
 -- * Message delivery
@@ -1032,9 +1053,9 @@ readMessage h =
                                              return $ Just hdr
                                      _ -> return Nothing
                         body <- hGetPayload h
-                        return (magic,adestp,anodeid,Message { msgHeader = header,
-                                           msgDisposition = adisp,
-                                           msgPayload = body
+                        return (magic,adestp,anodeid,EncodedMessage { msgEHeader = header,
+                                           msgEDisposition = adisp,
+                                           msgEPayload = body
                                            })
                   _ -> throw $ userError "Bad message format"
 
@@ -1086,7 +1107,7 @@ listenAndDeliver node cfg coord =
                   Right q -> return ()
          handleComm h = 
             do (magic,adestp,nodeid,msg) <- readMessage h
-               res <- messageHandler cfg node (msgDisposition msg) msg magic adestp
+               res <- messageHandler cfg node (getMessageDisposition msg) msg magic adestp
                writeResult h res
                case res of
                  QteOK -> handleComm h

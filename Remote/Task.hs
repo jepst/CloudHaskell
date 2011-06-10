@@ -28,7 +28,7 @@ module Remote.Task (
                    remoteCallRectify,
                    ) where
 
-import Remote.Reg (putReg,getEntryByIdent)
+import Remote.Reg (putReg,getEntryByIdent,RemoteCallMetaData)
 import Remote.Encoding (serialEncodePure,hGetPayload,hPutPayload,Payload(..),getPayloadContent,Serializable,serialDecode,serialEncode)
 import Remote.Process (roundtripQuery, roundtripQueryUnsafe, ServiceException(..), spawnAnd, AmSpawnOptions(..), TransmitStatus(..),diffTime,getConfig,Config(..),matchProcessDown,terminate,nullPid,monitorProcess,TransmitException(..),MonitorAction(..),ptry,LogConfig(..),getLogConfig,setNodeLogConfig,setLogConfig,nodeFromPid,LogLevel(..),LogTarget(..),logS,getLookup,say,LogSphere,NodeId,ProcessM,ProcessId,PayloadDisposition(..),getSelfPid,getSelfNode,matchUnknownThrow,receiveWait,receiveTimeout,roundtripResponse,roundtripResponseAsync,roundtripQueryImpl,match,invokeClosure,makePayloadClosure,spawn,spawnLocal,spawnLocalAnd,setDaemonic,send,makeClosure)
 import Remote.Closure (Closure(..))
@@ -325,6 +325,7 @@ passthrough__implPl pl = return pl
 passthrough__closure :: (Serializable a) => a -> Closure (TaskM a)
 passthrough__closure a = Closure "Remote.Task.passthrough__impl" (serialEncodePure a)
 
+__remoteCallMetaData :: RemoteCallMetaData
 __remoteCallMetaData x = putReg runWorkerNode__impl "Remote.Task.runWorkerNode__impl" 
                         (putReg passthrough__implPl "Remote.Task.passthrough__implPl" x)
 

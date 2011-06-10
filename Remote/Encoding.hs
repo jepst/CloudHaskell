@@ -10,12 +10,16 @@ module Remote.Encoding (
           serialEncodePure,
           serialDecode,
           serialDecodePure,
+          dynamicDecodePure,
+          dynamicEncodePure,
           Payload,
+          DynamicPayload,
           PayloadLength,
           hPutPayload,
           hGetPayload,
           payloadLength,
           getPayloadType,
+          getDynamicPayloadType,
           getPayloadContent,
           genericPut,
           genericGet) where
@@ -27,7 +31,8 @@ import qualified Data.ByteString.Lazy as B (hPut,hGet,length)
 import Control.Exception (try,evaluate,ErrorCall)
 import Data.Int (Int64)
 import System.IO (Handle)
-import Data.Typeable (typeOf,Typeable)
+import Data.Typeable (typeOf,typeOf,Typeable)
+import Data.Dynamic (Dynamic,toDyn,fromDynamic,dynTypeRep)
 import Data.Generics (Data,gfoldl,gunfold, toConstr,constrRep,ConstrRep(..),repConstr,extQ,extR,dataTypeOf)
 
 -- | Data that can be sent as a message must implement
@@ -47,6 +52,10 @@ data Payload = Payload
                   payloadType :: !ByteString,
                   payloadContent :: !ByteString
                 } deriving (Typeable)
+data DynamicPayload = DynamicPayload
+                {
+                  dynamicPayloadContent :: Dynamic
+                }
 type PayloadLength = Int64
 
 instance Binary Payload where
@@ -80,6 +89,15 @@ serialEncodePure :: (Serializable a) => a -> Payload
 serialEncodePure a = let encoding = encode a
                       in encoding `seq` Payload {payloadType = encode $ show $ typeOf a,
                                                  payloadContent = encoding}
+
+dynamicEncodePure :: (Serializable a) => a -> DynamicPayload
+dynamicEncodePure a = DynamicPayload {dynamicPayloadContent = toDyn a}
+
+dynamicDecodePure :: (Serializable a) => DynamicPayload -> Maybe a
+dynamicDecodePure a = fromDynamic (dynamicPayloadContent a)
+
+getDynamicPayloadType :: DynamicPayload -> String
+getDynamicPayloadType a = show (dynTypeRep (dynamicPayloadContent a))
 
 -- TODO I suspect that we will get better performance for big messages if let this be lazy
 -- see also serialDecode

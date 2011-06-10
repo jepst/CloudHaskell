@@ -16,7 +16,7 @@ module Remote.Channel (
                        -- * Terminate a channel
                        terminateChannel) where
 
-import Remote.Process (ProcessM,send,setDaemonic,getProcess,prNodeRef,getNewMessageLocal,localFromPid,isPidLocal,TransmitException(..),TransmitStatus(..),msgPayload,spawnLocalAnd,ProcessId,Node,UnknownMessageException(..))
+import Remote.Process (ProcessM,send,getMessageType,getMessagePayload,setDaemonic,getProcess,prNodeRef,getNewMessageLocal,localFromPid,isPidLocal,TransmitException(..),TransmitStatus(..),spawnLocalAnd,ProcessId,Node,UnknownMessageException(..))
 import Remote.Encoding (getPayloadType,serialDecodePure,Serializable)
 
 import Data.List (foldl')
@@ -146,8 +146,8 @@ receiveChannelSimple node (ReceivePortSimple chpid _) =
              do mmsg <- getNewMessageLocal (node) (localFromPid chpid)
                 case mmsg of
                    Nothing -> badPid
-                   Just msg -> case serialDecodePure (msgPayload msg) of
-                                    Nothing -> throw $ UnknownMessageException (getPayloadType $ msgPayload msg)
+                   Just msg -> case getMessagePayload msg of
+                                    Nothing -> throw $ UnknownMessageException (getMessageType msg)
                                     Just q -> return q
    where badPid = throw $ TransmitException QteUnknownPid
 
