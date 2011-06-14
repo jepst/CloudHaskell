@@ -33,8 +33,7 @@ merger a b = do a1 <- readPromise a
 $( remotable ['diver,'adder, 'merger] )
 
 initialProcess "MASTER" = 
-                   do mypid <- getSelfPid
-                      ans <- runTask $
+                   do ans <- runTask $
                           do 
                              a <- newPromise (diver__closure 300 9)
                              b <- newPromise (diver__closure 300 5)

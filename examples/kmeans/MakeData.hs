@@ -10,14 +10,14 @@ import qualified Data.ByteString.Lazy as B
 
 
 -- vectorsPerFile = 80000 -- should be 80000
-numClusters = 100
-vectorDimensions = 100 -- should be 100
+numClusters = 10
+vectorDimensions = KMeansCommon.vectorSize
 minValue = -1.0
 maxValue = 1.0
 
 val = getStdRandom (randomR (minValue,maxValue))
 vector = do vals <- mapM (const val) [1..vectorDimensions]
-            return $ Vector $ listArray (0,vectorDimensions-1) vals
+            return $ Vector $! listArray (0,vectorDimensions-1) vals
 file vectorsPerFile = mapM (const vector) [1..vectorsPerFile]
 
 clusters = mapM (\x -> do v <- vector
@@ -26,8 +26,7 @@ clusters = mapM (\x -> do v <- vector
 
 makeBig :: Int -> IO ()
 makeBig i = do c <- clusters
-               p <- file i
-               withFile "kmeans-points" WriteMode (\h -> mapM (\v -> hPutStrLn h (show v)) p)
+               withFile "kmeans-points" WriteMode (\h -> mapM (\_ -> do a <- vector ; hPutStrLn h (show a)) [1..i] )  
                writeFile "kmeans-clusters" $ show c
 
 main = do a <- getArgs

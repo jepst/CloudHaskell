@@ -60,7 +60,7 @@ module Remote.Process  (
 
                        -- * System service processes, not for general use
                        startSpawnerService, startLoggingService, startProcessMonitorService, startLocalRegistry, startFinalizerService,
-                       startNodeMonitorService, startProcessRegistry, standaloneLocalRegistry
+                       startNodeMonitorService, startProcessRegistryService, standaloneLocalRegistry
                        )
                        where
 
@@ -529,7 +529,7 @@ matchCore cond body =
         let    
            decodified = getMessagePayload (mbMessage mb)
            decodifiedh = getMessageHeader (mbMessage mb)
-        in decodified `seq` decodifiedh `seq`
+        in -- decodified `seq` decodifiedh `seq`          TODO is this good or bad?
             case decodified of
               Just x -> if cond (x,decodifiedh) 
                            then returnHalt () (body (x,decodifiedh))
@@ -941,7 +941,20 @@ sendBasic :: (Serializable a,Serializable b) => MVar Node -> ProcessId -> a -> M
 sendBasic mnode pid msg msghdr pld pool = do
               nid <- getNodeId mnode
               let islocal = nodeFromPid pid == nid
-              let themsg = makeMessage islocal pld msg msghdr
+
+              -- TODO It's important that the semantics of messaging are preserved
+              -- regardles of the location of particular processes. Messages are
+              -- fully evaluated when sent to a remote node as part of the serialization
+              -- but they don't need to be when sending to a local process; the message
+              -- is just plopped into a TChan, basically. Unfortunately, this means
+              -- that exceptions associated with the serialization of data will be
+              -- handled by the receiving process, rather than the sender, which
+              -- it may not be prepared for. An easy way to crash a system process,
+              -- then, is to send it a message contained undefined or divide by zero.
+              -- To prevent this, we now serialize all messages, even those bound for
+              -- local destinations.
+              -- FORMERLY: let themsg = makeMessage islocal pld msg msghdr
+              let themsg = makeMessage False pld msg msghdr
               (if islocal then sendRawLocal else sendRawRemote) mnode pid nid themsg pool
 
 sendRawLocal :: MVar Node -> ProcessId -> NodeId -> Message -> Maybe (IORef (Map.Map NodeId Handle)) -> IO TransmitStatus
@@ -1569,7 +1582,7 @@ logApplyFilter cfg sph lev = filterSphere (logFilter cfg)
 -- | Uses the logging facility to produce non-filterable, programmatic output. Shouldn't be used
 -- for informational logging, but rather for application-level output.
 say :: String -> ProcessM ()
-say v = logS "SAY" LoSay v
+say v = v `seq` logS "SAY" LoSay v
 
 -- | Gets the currently active log configuration
 -- for the current process; if the current process
@@ -1626,7 +1639,7 @@ logI mnode pid sph ll txt = do node <- readMVar mnode
 --
 -- Both of the first two parameters may be used to filter log output.
 logS :: LogSphere -> LogLevel -> String -> ProcessM ()
-logS sph ll txt = do lc <- getLogConfig
+logS sph ll txt = do lc <- txt `seq` getLogConfig
                      when (filtered lc)
                          (sendMsg lc)
          where filtered cfg = logApplyFilter cfg sph ll
@@ -1866,8 +1879,8 @@ instance Binary ProcessRegistryAnswer where
              0 -> get >>= (return . ProcessRegistryResponse)
              1 -> get >>= (return . ProcessRegistryError)
 
-startProcessRegistry :: ProcessM ()
-startProcessRegistry = serviceThread ServiceProcessRegistry (service initialState)
+startProcessRegistryService :: ProcessM ()
+startProcessRegistryService = serviceThread ServiceProcessRegistry (service initialState)
   where
     initialState = ProcessRegistryState Map.empty Map.empty
     service state@(ProcessRegistryState nameToPid pidToName) = 
@@ -2582,7 +2595,7 @@ localRegistryMagicRole = "__LocalRegistry"
 type LocalProcessName = String
 
 -- | Created by 'Remote.Peer.getPeers', this maps
--- each each role to a list of nodes that have that role.
+-- each role to a list of nodes that have that role.
 -- It can be examined directly or queried with
 -- 'findPeerByRole'.
 type PeerInfo = Map.Map String [NodeId]

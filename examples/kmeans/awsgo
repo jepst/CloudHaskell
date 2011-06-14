@@ -38,9 +38,28 @@ try()
    then
      echo 1>&2 "Failed during $msg: `cat tmp-log`"
      rm tmp-log
-     exit 1
+     return 1
    fi
    rm tmp-log
+   return 0
+}
+try1()
+{
+   if ! try "$@"
+   then 
+     echo 1>&2 "Retrying..."
+     sleep 10
+     if ! try "$@"
+     then    
+        echo 1>&2 "Retrying again..."
+        sleep 20
+        if ! try "$@"
+        then
+           echo 1>&2 "Giving up."
+           exit 1
+        fi
+     fi 
+   fi
    return 0
 }
 """
@@ -51,11 +70,13 @@ node_config_script = script_header+"""
 cd
 try cfg.log "update apt repository" sudo apt-get -q -y update
 try cfg.log "install apt packages" sudo apt-get -q -y install %(apts)s
+try1 cfg.log "cabalupdate" cabal update
+try1 cfg.log "cabalify" cabal install pureMD5 utf8-string directory crypto-api tagged data-default cereal semigroups
 try cfg.log "retrieve git repository" git clone git://github.com/jepst/CloudHaskell.git
 cd CloudHaskell
 try cfg.log "configure local repository" cabal configure
-try cfg.log "build local repository" cabal build
-try cfg.log "install local repoistory" cabal install
+try1 cfg.log "build local repository" cabal build
+try1 cfg.log "install local repoistory" cabal install
 cd
 try cfg.log "compile executable" ghc -O3 --make KMeans.hs
 """ % node_config_data
@@ -96,6 +117,9 @@ def allinstances_xfer(keyfile,username,instances,thefile):
           result = subproc.wait()
           if result == 0:
              break
+          else:
+             print "Problem transfering",thefile,"to",i.public_dns_name," and retrying"
+             time.sleep(60)
 
 def allinstances_recv(keyfile,username,instances,thefile):
     processes = []
@@ -116,11 +140,12 @@ def allinstances_runscript(keyfile,username,instances,scriptmaker):
        fname="tmp-"+str(counter) # use random nm here
        writefile(fname,text)
        cmd1=["scp","-r","-q","-i",keyfile]+ssh_opts+[ fname ,username+"@"+i.public_dns_name+":"]
-       cmd2=["ssh","-q","-i",keyfile,"-l",username,"-o","StrictHostKeyChecking=no", i.public_dns_name,"bash",fname]
+       cmd2=["ssh","-q","-i",keyfile]+ssh_opts+["-l",username,"-o","StrictHostKeyChecking=no", i.public_dns_name,"bash",fname]
        cmd = ["bash","-c",(" ".join(cmd1))+" ; "+(" ".join(cmd2))]
        subproc=subprocess.Popen(cmd,stderr=subprocess.STDOUT)
        processes.append(subproc)
        counter=counter+1
+       time.sleep(60)
     for (i,p) in zip(instances,processes):
         result = p.wait()
         if result != 0:
@@ -241,7 +266,7 @@ def main():
     starttime=time.time()
     allinstances_exec(keypairfile,options.username,master,["./KMeans","-cfgRole=MASTER"]+exec_args)
     endtime=time.time()
-    print "Completed computation in "+str(endtime-starttime)+" seconds."
+#    print "Completed computation in "+str(endtime-starttime)+" seconds."
 
 #    print "Retrieving results."
 #    allinstances_recv(keypairfile,options.username,master,"kmeans-converged")
