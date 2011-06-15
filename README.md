@@ -12,6 +12,18 @@ This file contains a (slightly out-of-date) introduction to the process layer. W
 
 We suggest perusing the up-to-date Haddock [documentation](http://www.cl.cam.ac.uk/~jee36/remote/) and the [paper](http://www.cl.cam.ac.uk/~jee36/remote.pdf).
 
+
+Installation
+------------
+Assuming you have the Haskell Platform installed, just run these commands from the Cloud Haskell directory:
+
+```
+cabal configure
+cabal install
+```
+
+You can then compile your own Cloud Haskell applications, or try out the programs in the examples directory.
+
 Process layer: an introduction
 ------------------------------
 
