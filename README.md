@@ -6,11 +6,11 @@ This is **Cloud Haskell**. It's a Haskell framework for distributed applications
 Cloud Haskell has two interfaces:
 
 * an interface based on message-passing between distributed processes. Think of it as Erlang (or MPI) in Haskell. We call this part the _process layer_.
-* a fault-tolerant data-centric interface. We call this part the _task layer_. This layer makes it even easier to build distributed applications; the framework automatically takes care of moving your data around and recovering from hardware failure. This layer can be compared to Google's MapReduce but is in fact more flexible; it's closer to Microsoft's Dryad.
+* a fault-tolerant data-centric interface. We call this part the _task layer_. This layer makes it even easier to build distributed applications; the framework automatically takes care of moving your data around and recovering from hardware failure. This layer can be compared to Google's MapReduce but is in fact more flexible.
 
-This file contains a (slightly out-of-date) introduction to the process layer. We're working on proper documentation for the task layer, but there are example programs included in the distribution.
+This file contains a (slightly out-of-date) introduction to the process layer. There are example programs included in the distribution.
 
-We suggest perusing the up-to-date Haddock [documentation](http://www.cl.cam.ac.uk/~jee36/remote/) and the [paper](http://www.cl.cam.ac.uk/~jee36/remote.pdf).
+We suggest perusing the up-to-date Haddock [documentation](http://www.cl.cam.ac.uk/~jee36/remote/) and the [paper](http://www.cl.cam.ac.uk/~jee36/remote.pdf). My [thesis](http://www.cl.cam.ac.uk/~jee36/thesis.pdf) additionally documents the task layer and some internals.
 
 
 Installation

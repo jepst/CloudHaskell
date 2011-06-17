@@ -145,7 +145,7 @@ def allinstances_runscript(keyfile,username,instances,scriptmaker):
        subproc=subprocess.Popen(cmd,stderr=subprocess.STDOUT)
        processes.append(subproc)
        counter=counter+1
-       time.sleep(60)
+       time.sleep(5)
     for (i,p) in zip(instances,processes):
         result = p.wait()
         if result != 0:
