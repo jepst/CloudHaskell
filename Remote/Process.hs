@@ -12,7 +12,7 @@ module Remote.Process  (
                        -- * Message receiving
                        expect,
                        MatchM,receive,receiveWait,receiveTimeout,
-                       match,matchIf,matchUnknown,matchUnknownThrow,matchProcessDown,
+                       match,matchIf,matchCond,matchUnknown,matchUnknownThrow,matchProcessDown,
 
                        -- * Message sending
                        send,sendQuiet,
@@ -515,6 +515,13 @@ match = matchCoreHeaderless  (const True)
 -- as in 'match'
 matchIf :: (Serializable a) => (a -> Bool) -> (a -> ProcessM q) -> MatchM q ()
 matchIf = matchCoreHeaderless 
+
+matchCond :: (Serializable a) => (a -> Maybe (ProcessM q)) -> MatchM q ()
+matchCond f = 
+   matchIf (not . isNothing . f) run
+  where run a = case f a of
+                   Nothing -> throw $ TransmitException $ QteOther $ "Indecesive predicate in matchCond"
+                   Just a -> a
 
 matchCoreHeaderless :: (Serializable a) => (a -> Bool) -> (a -> ProcessM q) -> MatchM q ()
 matchCoreHeaderless f g = matchCore (\(a,b) -> b==(Nothing::Maybe ()) && f a)
