@@ -1,6 +1,6 @@
 Name:                remote
 Version:             0.1
-Cabal-Version:       >=1.2
+Cabal-Version:       >=1.8
 Description:         Fault-tolerant distributed computing framework
 synopsis:            Cloud Haskell
 License:             BSD3
@@ -17,3 +17,7 @@ library
   Extensions:          TemplateHaskell, FlexibleInstances, UndecidableInstances, CPP, ExistentialQuantification, DeriveDataTypeable
   Exposed-Modules:     Remote.Process, Remote.Encoding, Remote.Call, Remote.Reg, Remote.Peer, Remote.Init, Remote.Closure, Remote.Channel, Remote.Task, Remote
 
+executable pi6
+  Main-is:           pi/Pi6.hs
+  Hs-source-dirs:    examples
+  Build-Depends:     base == 4.*, containers, array == 0.3.*, remote
