@@ -129,8 +129,10 @@ getPeersDynamic t =
 findPeerByRole :: PeerInfo -> String -> [NodeId]
 findPeerByRole disc role = maybe [] id (Map.lookup role disc)
 
+{- UNUSED
 findRoles :: PeerInfo -> [String]
 findRoles disc = Map.keys disc
+-}
 
 waitForDiscovery :: Int -> ProcessM Bool
 waitForDiscovery delay 

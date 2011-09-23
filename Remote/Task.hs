@@ -112,7 +112,9 @@ data PromiseStorage = PromiseInMemory PromiseData UTCTime (Maybe Dynamic)
                     | PromiseException String
 
 type PromiseData = Payload
+{- UNUSED
 type TimeStamp = UTCTime
+-}
 
 -- | Keeps track of what we know about currently running promises.
 -- The closure and locality and provided by the initial call to
@@ -509,7 +511,9 @@ startMaster proc =
               res <- liftM snd $ runTaskM proc initialState
               liftIO $ putMVar mvdone res
 
+{- UNUSED
 type LocationSelector = MasterState -> ProcessM (NodeId,ProcessId)
+-}
 
 selectLocation :: MasterState -> Locality -> ProcessM (Maybe (String,NodeId,ProcessId))
 selectLocation ms locality =
@@ -544,6 +548,7 @@ sendSilent pid a = do res <- ptry $ send pid a
                         Left (TransmitException _) -> return ()
                         Right _ -> return ()
 
+{- UNUSED
 getStatus :: TaskM ()
 getStatus = 
    do master <- getMaster
@@ -554,6 +559,7 @@ getStatus =
               let verboseNodes = intercalate ", " (map show nodes)
                   verbosePromises = intercalate "\n" $ map (\(nb,l) -> (show nb)++" -- "++intercalate "," (map show l)) (Map.toList promises) 
                in tsay $ "\nKnown nodes: " ++ verboseNodes ++ "\n\nNodebosses: " ++ verbosePromises
+-}
 
 runMaster :: (ProcessId -> ProcessM ()) -> ProcessM ProcessId
 runMaster masterproc = 

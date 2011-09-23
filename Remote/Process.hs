@@ -228,10 +228,12 @@ getMessagePayload :: (Serializable a) => Message -> Maybe a
 getMessagePayload (EncodedMessage _ _ a) = serialDecodePure a
 getMessagePayload (DynamicMessage _ _ a) = dynamicDecodePure a
 
+{- UNUSED
 messageHasHeader :: Message -> Bool
 messageHasHeader (EncodedMessage _ (Just _) _) = True
 messageHasHeader (DynamicMessage _ (Just _) _) = True
 messageHasHeader _ = False
+-}
 
 getMessageHeader :: (Serializable a) => Message -> Maybe a
 getMessageHeader (EncodedMessage _ a _) = maybe Nothing serialDecodePure a
@@ -483,9 +485,11 @@ convertErrorCall f =
   where ff = do q <- f
                 q `seq` return q
 
+{- UNUSED
 matchDebug :: (Message -> ProcessM q) -> MatchM q ()
 matchDebug f = do mb <- getMatch
                   returnHalt () (f (mbMessage mb))
+-}
 
 -- | A catch-all variant of 'match' that invokes user-provided code and
 -- will extact any message from the queue. This is useful for matching
@@ -1120,6 +1124,7 @@ listenAndDeliver node cfg coord =
                         else PortNumber aNY_PORT
          handleCommSafe h = 
             (try $ handleComm h :: IO (Either IOError ())) >> return ()
+{- UNUSED
          logNetworkError :: IOError -> IO ()
          logNetworkError n = return ()
          writeResultTry h q =
@@ -1127,6 +1132,7 @@ listenAndDeliver node cfg coord =
                case res of
                   Left n -> logNetworkError n
                   Right q -> return ()
+-}
          handleComm h = 
             do (magic,adestp,_nodeid,msg) <- readMessage h
                res <- messageHandler cfg node (getMessageDisposition msg) msg magic adestp
@@ -1222,12 +1228,14 @@ printDumpMessageQueue = do liftIO $ putStrLn "----BEGINDUMP------"
                            liftIO $ putStrLn "----ENDNDUMP-------"
 -}
 
+{- UNUSED
 duration :: Int -> ProcessM a -> ProcessM (Int,a)
 duration t a = 
            do time1 <- liftIO $ getCurrentTime
               result <- a
               time2 <- liftIO $ getCurrentTime
               return (t - diffTime time2 time1,result)
+-}
 
 diffTime :: UTCTime -> UTCTime -> Int
 diffTime time2 time1 =
@@ -1287,9 +1295,11 @@ hostFromNid (NodeId hn _p) = hn
 buildPidFromNodeId :: NodeId -> LocalProcessId -> ProcessId
 buildPidFromNodeId n lp = ProcessId n lp
 
+{- UNUSED
 localServiceToPid :: LocalProcessId -> ProcessM ProcessId
-localServiceToPid sid = do (ProcessId nid lid) <- getSelfPid
+localServiceToPid sid = do (ProcessId nid _lid) <- getSelfPid
                            return $ ProcessId nid sid
+-}
 
 -- | Returns true if the given process ID is associated with the current node.
 -- Does not examine if the process is currently running.
@@ -1317,11 +1327,14 @@ ptry f = do p <- getProcess
               Left e -> return $ Left e
               Right (newp,newanswer) -> ProcessM (\_ -> return (newp,Right newanswer))
 
+{- UNUSED
 -- | A 'ProcessM'-flavoured variant of 'Control.Exception.catch'
 pcatch :: Exception e => ProcessM a -> (e -> ProcessM a) -> ProcessM a
 pcatch code handler = do p <- getProcess
                          liftIO $ catch (liftM snd $ runProcessM code p) (\e -> liftM snd $ runProcessM (handler e) p)
                          
+-}
+
 -- | A 'ProcessM'-flavoured variant of 'System.Timeout.timeout'
 ptimeout :: Int -> ProcessM a -> ProcessM (Maybe a)
 ptimeout t f = do p <- getProcess
@@ -1428,8 +1441,10 @@ processConfig rawLines from = foldl processLine from rawLines
   updateCfg _   opt _ = error ("Unknown configuration option: "++opt)
   isInt s | all isDigit s = s
   isInt s = error ("Not a good number: "++s)
+{- UNUSED
   nonempty s | (not.null) s = s
   nonempty b = error ("Unexpected empty item: " ++ b)
+-}
   clean = filter (not.isSpace)
 
 ----------------------------------------------
@@ -1815,12 +1830,14 @@ adminRegister val =  do p <- getProcess
                            else (fun (localFromPid pid) node))
             where fun pid node = return $ node {ndAdminProcessTable = Map.insert val pid (ndAdminProcessTable node)}
 
+{- UNUSED
 adminLookup :: ServiceId -> ProcessM LocalProcessId
 adminLookup val = do p <- getProcess
                      node <- liftIO $ readMVar (prNodeRef p)
                      case Map.lookup val (ndAdminProcessTable node) of
                         Nothing -> throw $ ServiceException $ "Request for unknown administrative service " ++ show val
                         Just x -> return x
+-}
 
 adminLookupN :: ServiceId -> MVar Node -> IO (Either TransmitStatus LocalProcessId)
 adminLookupN val mnode = 
@@ -2319,7 +2336,9 @@ startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyG
                                                   False -> do trigger monitor monitee action SrInvalid
                                                               return False
     trigger = triggerMonitor
+{- UNUSED
     forward destinationnode msg = sendSimple (getGlobalFor destinationnode) msg PldAdmin
+-}
     isProcessUp lpid = do p <- getProcess
                           node <- liftIO $ readMVar (prNodeRef p)
                           res <- liftIO $ atomically $ getProcessTableEntry node lpid
@@ -2592,8 +2611,10 @@ startSpawnerService = serviceThread ServiceSpawner spawner
 -- * Local node registry
 ----------------------------------------------
 
+{- UNUSED
 localRegistryMagicProcess :: LocalProcessId
 localRegistryMagicProcess = 38813
+-}
 
 localRegistryMagicMagic :: String
 localRegistryMagicMagic = "__LocalRegistry"
@@ -2611,7 +2632,9 @@ type PeerInfo = Map.Map String [NodeId]
 
 data LocalNodeData = LocalNodeData {ldmRoles :: PeerInfo} 
 
+{- UNUSED
 type RegistryData = Map.Map String LocalNodeData
+-}
 
 data LocalProcessMessage =
         LocalNodeRegister String String NodeId
@@ -2807,13 +2830,17 @@ data Queue a = Queue [a] [a]
 
 queueMake :: Queue a
 queueMake = Queue [] []
+
+{- UNUSED
 queueEmpty :: Queue a -> Bool
 queueEmpty (Queue [] []) = True
 queueEmpty _ = False
+-}
 
 queueInsert :: Queue a -> a -> Queue a
 queueInsert (Queue incoming outgoing) a = Queue (a:incoming) outgoing
 
+{- UNUSED
 queueInsertAndLimit :: Queue a -> Int -> a -> Queue a
 queueInsertAndLimit q limit a= 
        let s1 = queueInsert q a
@@ -2822,20 +2849,25 @@ queueInsertAndLimit q limit a=
                          in f
                    else s1
         in s2
+-}
 
 queueInsertMulti :: Queue a -> [a] -> Queue a
 queueInsertMulti (Queue incoming outgoing) a = Queue (a++incoming) outgoing
 
+{- UNUSED
 queueRemove :: Queue a -> (Maybe a,Queue a)
 queueRemove (Queue incoming (a:outgoing)) = (Just a,Queue incoming outgoing)
 queueRemove (Queue l@(_:_) []) = queueRemove $ Queue [] (reverse l)
 queueRemove q@(Queue [] []) = (Nothing,q)
+-}
 
 queueToList :: Queue a -> [a]
 queueToList (Queue incoming outgoing) = outgoing ++ reverse incoming
 queueFromList :: [a] -> Queue a
 queueFromList l = Queue [] l
 
+
+{- UNUSED
 queueLength :: Queue a -> Int
 queueLength (Queue incoming outgoing) = length incoming + length outgoing -- should probably just store in the length in the structure
 
@@ -2845,6 +2877,7 @@ queueEach q = case queueToList q of
                      a:rest -> each [] a rest
         where each before it []                     = [(it,queueFromList before)]
               each before it following@(next:after) = (it,queueFromList (before++following)):(each (before++[it]) next after)
+-}
 
 withSem :: QSem -> IO a -> IO a
 withSem sem f = action `finally` signalQSem sem

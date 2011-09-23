@@ -206,7 +206,9 @@ remotable names =
                                                                  match wildP (normalB (appE (errorcall) (litE (stringL ("Bad decoding in closure splice of "++nameBase aname))))) []])
                                                          ]))
                                             []]
+{- UNUSED
                     implPls = if isarrowful then [implPldec,implPldef] else []
+-}
                     implPldec = case last arglist of
                                  (AppT ( process) _v) |  process == tttaskm ->
                                       sigD implPlName (return $ putParams $ [payload,(AppT process payload)])
