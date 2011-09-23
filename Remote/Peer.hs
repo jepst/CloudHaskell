@@ -6,10 +6,12 @@
 -- which does it automatically.
 module Remote.Peer (PeerInfo,startDiscoveryService,getPeers,getPeersStatic,getPeersDynamic,findPeerByRole) where
 
+import Prelude hiding (all, pi)
+
 import Network.Socket (defaultHints,sendTo,recv,sClose,Socket,getAddrInfo,AddrInfoFlag(..),setSocketOption,addrFlags,addrSocketType,addrFamily,SocketType(..),Family(..),addrProtocol,SocketOption(..),AddrInfo,bindSocket,addrAddress,SockAddr(..),socket)
 import Network.BSD (getProtocolNumber)
 import Control.Concurrent.MVar (takeMVar, newMVar, modifyMVar_)
-import Remote.Process (PeerInfo,pingNode,makeNodeFromHost,spawnLocalAnd,setDaemonic,TransmitStatus(..),TransmitException(..),PayloadDisposition(..),ptimeout,getSelfNode,sendSimple,cfgRole,cfgKnownHosts,cfgPeerDiscoveryPort,match,receiveWait,getSelfPid,getConfig,NodeId(..),PortId,ProcessM,ptry,localRegistryQueryNodes)
+import Remote.Process (PeerInfo,pingNode,makeNodeFromHost,spawnLocalAnd,setDaemonic,TransmitStatus(..),TransmitException(..),PayloadDisposition(..),ptimeout,getSelfNode,sendSimple,cfgRole,cfgKnownHosts,cfgPeerDiscoveryPort,match,receiveWait,getSelfPid,getConfig,NodeId,PortId,ProcessM,ptry,localRegistryQueryNodes)
 import Control.Monad.Trans (liftIO)
 import Data.Typeable (Typeable)
 import Data.Maybe (catMaybes)
@@ -18,7 +20,7 @@ import Control.Exception (try,bracket,ErrorCall(..),throw)
 import Data.List (nub)
 import Control.Monad (filterM)
 import qualified Data.Traversable as Traversable (mapM) 
-import qualified Data.Map as Map (keys,Map,unionsWith,insertWith,empty,lookup)
+import qualified Data.Map as Map (unionsWith,insertWith,empty,lookup)
 
 data DiscoveryInfo = DiscoveryInfo
      {
@@ -65,7 +67,7 @@ sendBroadcast port str
 	(sClose)
 	(\sock -> do
             setSocketOption sock Broadcast 1
-	    res <- sendTo sock str (SockAddrInet (toEnum port) (-1))
+	    _res <- sendTo sock str (SockAddrInet (toEnum port) (-1))
             return ()
 	)
 
@@ -77,7 +79,7 @@ sendBroadcast port str
 getPeers :: ProcessM PeerInfo
 getPeers = do a <- getPeersStatic
               b <- getPeersDynamic 500000
-              verifyPeerInfo $ Map.unionsWith (\a b -> nub $ a ++ b) [a,b]
+              verifyPeerInfo $ Map.unionsWith (\x y -> nub $ x ++ y) [a,b]
 
 verifyPeerInfo :: PeerInfo -> ProcessM PeerInfo
 verifyPeerInfo pi = Traversable.mapM verify1 pi
@@ -112,7 +114,7 @@ getPeersDynamic t =
       case (cfgPeerDiscoveryPort cfg) of
           0 -> return Map.empty
           port -> do  -- TODO should send broacast multiple times in case of packet loss
-                      liftIO $ try $ sendBroadcast port (show pid) :: ProcessM (Either IOError ())
+                      _ <- liftIO $ try $ sendBroadcast port (show pid) :: ProcessM (Either IOError ())
                       responses <- liftIO $ newMVar []
                       _ <- ptimeout t (receiveInfo responses)
                       res <- liftIO $ takeMVar responses

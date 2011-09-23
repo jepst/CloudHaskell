@@ -14,7 +14,7 @@ import Control.Monad.Trans (liftIO)
 import Control.Monad (liftM)
 import Remote.Closure (Closure(..))
 import Remote.Process (ProcessM)
-import Remote.Reg (Lookup,putReg,RemoteCallMetaData)
+import Remote.Reg (putReg,RemoteCallMetaData)
 import Remote.Task (remoteCallRectify,TaskM)
 
 -- TODO this module is the result of months of tiny thoughtless changes and desperately needs a clean-up
@@ -124,7 +124,7 @@ remotable names =
        let outnames = concat $ map snd declGen
        regs <- sequence $ makeReg loc outnames
        return $ decs ++ regs
-    where makeReg loc names = 
+    where makeReg loc names' = 
               let
                       mkentry = [e| putReg |]
                       regtype = [t| RemoteCallMetaData |]
@@ -135,7 +135,7 @@ remotable names =
                       applies [] = varE param
                       applies [h] = appE (app2E mkentry (varE h) (litE $ stringL (reasonableNameModule h++nameBase h))) (varE param)
                       applies (h:t) = appE (app2E mkentry (varE h) (litE $ stringL (reasonableNameModule h++nameBase h))) (applies t)
-                      bodyq = normalB (applies names)
+                      bodyq = normalB (applies names')
                       sig = sigD registryName regtype
                       dec = funD registryName [clause [varP param] bodyq []]
                in [sig,dec]
@@ -170,6 +170,7 @@ remotable names =
                     isarrow _ = False
                     applyargs f [] = f
                     applyargs f (l:r) = applyargs (appE f l) r
+                    funtype :: Integer
                     funtype = case last arglist of
                                  (AppT (process) _) |  process == ttprocessm -> 0
                                                     |  process == ttio -> 1
@@ -207,7 +208,7 @@ remotable names =
                                             []]
                     implPls = if isarrowful then [implPldec,implPldef] else []
                     implPldec = case last arglist of
-                                 (AppT ( process) v) |  process == tttaskm ->
+                                 (AppT ( process) _v) |  process == tttaskm ->
                                       sigD implPlName (return $ putParams $ [payload,(AppT process payload)])
                                  _ -> sigD implPlName (return $ putParams implarglist)
                     implPldef = case last arglist of
@@ -222,16 +223,20 @@ remotable names =
                   in ([closuredec,closuredef,impldec,impldef]++if not isarrowful then [implPldec,implPldef] else [],
                               [aname,implName]++if not isarrowful then [implPlName] else [])
  
+getType :: Name -> Q [(Name, Type)]
 getType name = 
   do info <- reify name
      case info of 
        VarI iname itype _ _ -> return [(iname,itype)]
        _ -> return []
 
+putParams :: [Type] -> Type
 putParams (afst:lst:[]) = AppT (AppT ArrowT afst) lst
 putParams (afst:[]) = afst
 putParams (afst:lst) = AppT (AppT ArrowT afst) (putParams lst)
 putParams [] = error "Unexpected parameter type in remotable processing"
+
+getParams :: Type -> [Type]
 getParams typ = case typ of
                             AppT (AppT ArrowT b) c -> b : getParams c
                             b -> [b]
