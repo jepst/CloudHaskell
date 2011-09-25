@@ -75,6 +75,7 @@ import Data.Char (isSpace,isDigit)
 import Data.List (isSuffixOf,foldl', isPrefixOf,nub)
 import Data.Maybe (catMaybes,isNothing)
 import Data.Typeable (Typeable)
+import Data.Data (Data)
 import Data.Unique (newUnique,hashUnique)
 import System.IO (Handle,hClose,hSetBuffering,hGetChar,hPutChar,BufferMode(..),hFlush)
 import System.IO.Error (isEOFError,isDoesNotExistError,isUserError)
@@ -150,13 +151,13 @@ data Node = Node
 
 -- | Identifies a node somewhere on the network. These
 -- can be queried from 'getPeers'. See also 'getSelfNode'
-data NodeId = NodeId !HostName !PortId deriving (Typeable,Eq,Ord)
+data NodeId = NodeId !HostName !PortId deriving (Typeable,Eq,Ord,Data)
 
 -- | Identifies a process somewhere on the network. These
 -- are produced by the 'spawn' family of functions and
 -- consumed by 'send'. When a process ends, its process ID
 -- ceases to be valid. See also 'getSelfPid'
-data ProcessId = ProcessId !NodeId !LocalProcessId deriving (Typeable,Eq,Ord)
+data ProcessId = ProcessId !NodeId !LocalProcessId deriving (Typeable,Eq,Ord,Data)
 
 instance Binary NodeId where
    put (NodeId h p) = put h >> put p
