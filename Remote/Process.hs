@@ -45,7 +45,7 @@ module Remote.Process  (
                        waitForThreads,performFinalization,forkAndListenAndDeliver,runLocalProcess,
 
                        -- * Closures
-                       makeClosure,invokeClosure,
+                       makeClosure,invokeClosure,evaluateClosure,
  
                        -- * Debugging aids
                        getQueueLength,nodeFromPid,localFromPid,hostFromNid,
@@ -2802,6 +2802,11 @@ makePayloadClosure (Closure name arg) =
                 case isSuffixOf "__impl" name of
                   False -> Nothing
                   True -> Just $ Closure (name++"Pl") arg
+
+evaluateClosure :: (Typeable b) => Closure a -> ProcessM (Maybe (Payload -> b))
+evaluateClosure (Closure name _) =
+        do node <- getLookup
+           return $ getEntryByIdent node name
 
 invokeClosure :: (Typeable a) => Closure a -> ProcessM (Maybe a)
 invokeClosure (Closure name arg) = 
