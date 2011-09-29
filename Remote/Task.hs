@@ -47,6 +47,7 @@ import Data.List ((\\),union,nub,groupBy,sortBy,delete)
 import Data.Time (UTCTime,getCurrentTime)
 
 -- imports required for hashClosure; is there a lighter-weight of doing this?
+import Data.Digest.Pure.MD5 (md5)
 import Data.ByteString.Lazy.UTF8 (fromString)
 import qualified Data.ByteString.Lazy as B (concat)
 
@@ -354,7 +355,7 @@ forwardLogs masterpid =
              in setNodeLogConfig newlc
 
 hashClosure :: Closure a -> Hash
-hashClosure (Closure s pl) = show $ "ASDF"
+hashClosure (Closure s pl) = show $ md5 $ B.concat [fromString s, getPayloadContent pl]
 
 undiskify :: FilePath -> MVar PromiseStorage -> ProcessM (Maybe PromiseData)
 undiskify fpIn mps =
