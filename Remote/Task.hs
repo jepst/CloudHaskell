@@ -24,8 +24,7 @@ module Remote.Task (
                    TaskException(..),
 
                    -- * Internals, not for general use
-                   __remoteCallMetaData,
-                   remoteCallRectify,
+                   __remoteCallMetaData, serialEncodeA, serialDecodeA
                    ) where
 
 import Remote.Reg (putReg,getEntryByIdent,RemoteCallMetaData)
@@ -49,7 +48,6 @@ import System.FilePath (FilePath)
 import Data.Time (UTCTime,getCurrentTime)
 
 -- imports required for hashClosure; is there a lighter-weight of doing this?
-import Data.Digest.Pure.MD5 (md5)
 import Data.ByteString.Lazy.UTF8 (fromString)
 import qualified Data.ByteString.Lazy as B (concat)
 
@@ -276,6 +274,12 @@ defaultLocality = LcByRole ["WORKER","NODE"]
 taskError :: String -> a
 taskError s = throw $ TaskException s
 
+serialEncodeA :: (Serializable a) => a -> TaskM Payload
+serialEncodeA = liftTask . liftIO . serialEncode
+
+serialDecodeA :: (Serializable a) => Payload -> TaskM (Maybe a)
+serialDecodeA = liftTask . liftIO . serialDecode
+
 monitorTask :: ProcessId -> ProcessId -> ProcessM TransmitStatus
 monitorTask monitor monitee
    = do res <- ptry $ monitorProcess monitor monitee MaMonitor 
@@ -349,7 +353,7 @@ forwardLogs masterpid =
              in setNodeLogConfig newlc
 
 hashClosure :: Closure a -> Hash
-hashClosure (Closure s pl) = show $ md5 $ B.concat [fromString s, getPayloadContent pl]
+hashClosure (Closure s pl) = show $ "ASDF"
 
 undiskify :: FilePath -> MVar PromiseStorage -> ProcessM (Maybe PromiseData)
 undiskify fp mps =
@@ -876,12 +880,6 @@ liftTask a = TaskM $ \ts -> a >>= (\x -> return (ts,x))
 
 liftTaskIO :: IO a -> TaskM a
 liftTaskIO = liftTask . liftIO
-
-remoteCallRectify :: (Serializable a) => ProcessM (TaskM a) -> TaskM Payload
-remoteCallRectify x = 
-         do a <- liftTask x
-            res <- a
-            liftTaskIO $ serialEncode res
 
 -- | A Task-monadic version of 'Remote.Process.say'.
 -- Puts text messages in the log.
