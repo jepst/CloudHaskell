@@ -28,8 +28,8 @@ module Remote.Task (
                    ) where
 
 import Remote.Reg (putReg,getEntryByIdent,RemoteCallMetaData)
-import Remote.Encoding (serialEncodePure,hGetPayload,hPutPayload,Payload(..),getPayloadContent,Serializable,serialDecode,serialEncode)
-import Remote.Process (roundtripQuery, roundtripQueryUnsafe, ServiceException(..), spawnAnd, AmSpawnOptions(..), TransmitStatus(..),diffTime,getConfig,Config(..),matchProcessDown,terminate,nullPid,monitorProcess,TransmitException(..),MonitorAction(..),ptry,LogConfig(..),getLogConfig,setNodeLogConfig,setLogConfig,nodeFromPid,LogLevel(..),LogTarget(..),logS,getLookup,say,LogSphere,NodeId,ProcessM,ProcessId,PayloadDisposition(..),getSelfPid,getSelfNode,matchUnknownThrow,receiveWait,receiveTimeout,roundtripResponse,roundtripResponseAsync,roundtripQueryImpl,match,invokeClosure,makePayloadClosure,spawn,spawnLocal,spawnLocalAnd,setDaemonic,send,makeClosure)
+import Remote.Encoding (serialEncodePure,hGetPayload,hPutPayload,Payload,getPayloadContent,Serializable,serialDecode,serialEncode)
+import Remote.Process (roundtripQuery, ServiceException(..), TransmitStatus(..),diffTime,getConfig,Config(..),matchProcessDown,terminate,nullPid,monitorProcess,TransmitException(..),MonitorAction(..),ptry,LogConfig(..),getLogConfig,setNodeLogConfig,nodeFromPid,LogLevel(..),LogTarget(..),logS,getLookup,say,LogSphere,NodeId,ProcessM,ProcessId,PayloadDisposition(..),getSelfPid,getSelfNode,matchUnknownThrow,receiveWait,receiveTimeout,roundtripResponse,roundtripResponseAsync,roundtripQueryImpl,match,makePayloadClosure,spawn,spawnLocal,spawnLocalAnd,setDaemonic,send,makeClosure)
 import Remote.Closure (Closure(..))
 import Remote.Peer (getPeers)
 
@@ -37,14 +37,13 @@ import Data.Dynamic (Dynamic, toDyn, fromDynamic)
 import System.IO (withFile,IOMode(..))
 import System.Directory (renameFile)
 import Data.Binary (Binary,get,put,putWord8,getWord8)
-import Control.Exception (SomeException,Exception,throw,try)
+import Control.Exception (SomeException,Exception,throw)
 import Data.Typeable (Typeable)
 import Control.Monad (liftM,when)
 import Control.Monad.Trans (liftIO)
 import Control.Concurrent.MVar (MVar,modifyMVar,modifyMVar_,newMVar,newEmptyMVar,takeMVar,putMVar,readMVar,withMVar)
-import qualified Data.Map as Map (Map,fromList,insert,lookup,empty,elems,insertWith',toList)
-import Data.List ((\\),union,nub,groupBy,sortBy,delete,intercalate)
-import System.FilePath (FilePath)
+import qualified Data.Map as Map (Map,insert,lookup,empty,insertWith',toList)
+import Data.List ((\\),union,nub,groupBy,sortBy,delete)
 import Data.Time (UTCTime,getCurrentTime)
 
 -- imports required for hashClosure; is there a lighter-weight of doing this?
@@ -79,7 +78,7 @@ instance (Serializable a) => Binary (PromiseList a) where
 -- a distributed thunk (in the sense of a non-strict unit
 -- of evaluation). These are created by 'newPromise' and friends,
 -- and the underlying value can be gotten with 'readPromise'.
-data Promise a = PromiseBasic { psRedeemer :: ProcessId, psId :: PromiseId } 
+data Promise a = PromiseBasic { _psRedeemer :: ProcessId, _psId :: PromiseId } 
                | PromiseImmediate a deriving Typeable
 -- psRedeemer should maybe be wrapped in an IORef so that it can be updated in case of node failure
 
@@ -111,7 +110,9 @@ data PromiseStorage = PromiseInMemory PromiseData UTCTime (Maybe Dynamic)
                     | PromiseException String
 
 type PromiseData = Payload
+{- UNUSED
 type TimeStamp = UTCTime
+-}
 
 -- | Keeps track of what we know about currently running promises.
 -- The closure and locality and provided by the initial call to
@@ -356,7 +357,7 @@ hashClosure :: Closure a -> Hash
 hashClosure (Closure s pl) = show $ "ASDF"
 
 undiskify :: FilePath -> MVar PromiseStorage -> ProcessM (Maybe PromiseData)
-undiskify fp mps =
+undiskify fpIn mps =
       do wrap $ liftIO $ modifyMVar mps (\val ->
             case val of
               PromiseOnDisk fp -> 
@@ -367,7 +368,7 @@ undiskify fp mps =
               _ -> return (val,Nothing))
   where wrap a = do res <- ptry a
                     case res of
-                      Left e -> do logS "TSK" LoCritical $ "Error reading promise from file "++fp++": "++show (e::IOError)
+                      Left e -> do logS "TSK" LoCritical $ "Error reading promise from file "++fpIn++": "++show (e::IOError)
                                    return Nothing
                       Right r -> return r
 
@@ -378,7 +379,7 @@ diskify fp mps reallywrite =
             (handler (cfgPromiseFlushDelay cfg))
     where
          handler delay =
-           do receiveTimeout delay []
+           do _ <- receiveTimeout delay []
               again <- wrap $ liftIO $ modifyMVar mps (\val ->
                    case val of
                        PromiseInMemory payload utc _ ->
@@ -403,7 +404,7 @@ startNodeWorker :: ProcessId -> NodeBossState ->
                    MVar PromiseStorage -> Closure Payload -> ProcessM ()
 startNodeWorker masterpid nbs mps clo@(Closure cloname cloarg) = 
   do self <- getSelfPid
-     spawnLocalAnd (starter self) (prefix self)
+     _ <- spawnLocalAnd (starter self) (prefix self)
      return ()
   where 
         prefix nodeboss =
@@ -442,7 +443,7 @@ startNodeManager masterpid =
       handler :: NodeBossState -> ProcessM a
       handler state = 
         let promisecache = nsPromiseCache state
-            nmStart = roundtripResponse (\(NmStart promise clo queueing) -> 
+            nmStart = roundtripResponse (\(NmStart promise clo _queueing) -> 
                do promisestore <- liftIO $ newEmptyMVar
                   ret <- liftIO $ modifyMVar promisecache 
                     (\pc ->               let newpc = Map.insert promise promisestore pc 
@@ -471,7 +472,7 @@ startNodeManager masterpid =
                                                                                      ans (NmRedeemResponse a)
                                                                                 diskify fp v False
                                                          PromiseException _ -> ans NmRedeemResponseException
-                      in do spawnLocal answerer
+                      in do _ <- spawnLocal answerer
                             return state) False
          in receiveWait [nmStart, nmRedeem, nmTermination, matchUnknownThrow] >>= handler
    in do forwardLogs $ Just masterpid
@@ -514,7 +515,9 @@ startMaster proc =
               res <- liftM snd $ runTaskM proc initialState
               liftIO $ putMVar mvdone res
 
+{- UNUSED
 type LocationSelector = MasterState -> ProcessM (NodeId,ProcessId)
+-}
 
 selectLocation :: MasterState -> Locality -> ProcessM (Maybe (String,NodeId,ProcessId))
 selectLocation ms locality =
@@ -549,6 +552,7 @@ sendSilent pid a = do res <- ptry $ send pid a
                         Left (TransmitException _) -> return ()
                         Right _ -> return ()
 
+{- UNUSED
 getStatus :: TaskM ()
 getStatus = 
    do master <- getMaster
@@ -559,6 +563,7 @@ getStatus =
               let verboseNodes = intercalate ", " (map show nodes)
                   verbosePromises = intercalate "\n" $ map (\(nb,l) -> (show nb)++" -- "++intercalate "," (map show l)) (Map.toList promises) 
                in tsay $ "\nKnown nodes: " ++ verboseNodes ++ "\n\nNodebosses: " ++ verbosePromises
+-}
 
 runMaster :: (ProcessId -> ProcessM ()) -> ProcessM ProcessId
 runMaster masterproc = 
@@ -567,12 +572,11 @@ runMaster masterproc =
         do recentlist <- findPeers -- TODO if a node fails to response to a probe even once, it's gone forever; be more flexible
            let newseen = seen `union` recentlist
            let topidlist = recentlist \\ seen
-           let getnid (_,n,_) = n
            let cleanOut n = filter (\(_,nid,_) -> nid `elem` (map snd recentlist)) n
            newlypidded <- mapM (\(role,nid) -> 
                              do pid <- runWorkerNode masterpid nid
                                 return (role,nid,pid)) topidlist           
-           (newlist,totalseen) <- liftIO $ modifyMVar nodes (\oldlist ->
+           (_newlist,totalseen) <- liftIO $ modifyMVar nodes (\oldlist ->
                         return ((cleanOut oldlist) ++ newlypidded,(recentlist,newseen)))
            let newlyadded = totalseen \\ seen
            mapM_ (\nid -> sendSilent masterpid (TmNewPeer nid)) (map snd newlyadded)
@@ -580,7 +584,7 @@ runMaster masterproc =
      proberDelay = 10000000 -- how often do we check the network to see what nodes are available?
      prober nodes seen masterpid =
         do totalseen <- probeOnce nodes seen masterpid
-           receiveTimeout proberDelay [matchUnknownThrow]
+           _ <- receiveTimeout proberDelay [matchUnknownThrow]
            prober nodes totalseen masterpid
      master state = 
         let 
@@ -589,7 +593,7 @@ runMaster masterproc =
                  case ns of
                     Nothing -> do logS "TSK" LoCritical "Attempt to allocate a task, but no nodes found"
                                   return Nothing
-                    Just (loc@(_,nid,nodeboss)) -> 
+                    Just (_,nid,nodeboss) -> 
                          do res <- roundtripQuery PldUser nodeboss (NmStart promiseid clo queueing) -- roundtripQuery monitors and then unmonitors, which generates a lot of traffic; we probably don't need to do this
                             case res of
                               Left e -> 
@@ -658,11 +662,11 @@ runMaster masterproc =
          let getByNid _ [] = Nothing
              getByNid nid ((_,n,nodeboss):xs) = if nid==n then Just nodeboss else getByNid nid xs
          res <- liftIO $ withMVar nodes (\n -> return $ getByNid selfnode n)
-         case res of
+         _ <- case res of
              Nothing -> taskError "Can't find self: make sure cfgKnownHosts includes the master"
              Just x -> spawnLocalAnd (masterproc x) (do myself <- getSelfPid
                                                         monitorProcess selfpid myself MaLinkError)
-         spawnDaemonic (prober nodes seennodes masterpid)
+         _ <- spawnDaemonic (prober nodes seennodes masterpid)
          return masterpid
 
 stubborn :: (Monad m) => Int -> m (Maybe a) -> m (Maybe a)
@@ -697,7 +701,7 @@ toPromiseAt locality a = newPromiseAt locality (passthrough__closure a)
 toPromiseNear :: (Serializable a,Serializable b) => Promise b -> a -> TaskM (Promise a)
 toPromiseNear (PromiseImmediate _) = toPromise
 -- TODO should I consult tsRedeemerForwarding here?
-toPromiseNear (PromiseBasic prhost prid) = toPromiseAt (LcByNode [nodeFromPid prhost])
+toPromiseNear (PromiseBasic prhost _prid) = toPromiseAt (LcByNode [nodeFromPid prhost])
 
 -- | Creates an /immediate promise/, which is to say, a promise
 -- in name only. Unlike a regular promise (created by 'toPromise'), 
@@ -736,7 +740,7 @@ newPromiseHere clo =
 -- evaluated.
 newPromiseNear :: (Serializable a, Serializable b) => Promise b -> Closure (TaskM a) -> TaskM (Promise a)
 newPromiseNear (PromiseImmediate _) = newPromise
-newPromiseNear (PromiseBasic prhost prid) = newPromiseAt (LcByNode [nodeFromPid prhost]) 
+newPromiseNear (PromiseBasic prhost _prid) = newPromiseAt (LcByNode [nodeFromPid prhost]) 
 
 -- | A variant of 'newPromise' that prefers to start
 -- the computing functions on some set of nodes that
@@ -782,10 +786,10 @@ readPromise thepromise@(PromiseBasic prhost prid) =
                           res <- roundtrip fprhost (NmRedeem prid)
                           case res of
                              Left e -> do tlogS "TSK" LoInformation $ "Complaining about promise " ++ show prid ++" on " ++show fprhost++" because of "++show e
-                                          complain prhost fprhost prid
+                                          complain fprhost prid
                              Right NmRedeemResponseUnknown -> 
                                        do tlogS "TSK" LoInformation $ "Complaining about promise " ++ show prid ++" on " ++show fprhost++" because allegedly unknown"
-                                          complain prhost fprhost prid
+                                          complain fprhost prid
                              Right (NmRedeemResponse thedata) -> 
                                                   do extracted <- extractFromPayload thedata
                                                      promiseinmem <- liftTaskIO $ makePromiseInMemory thedata (Just $ toDyn extracted)
@@ -795,7 +799,7 @@ readPromise thepromise@(PromiseBasic prhost prid) =
                                   taskError "Failed promise redemption" -- don't redeem, this is a terminal failure
             Just mv -> do val <- liftTaskIO $ readMVar mv -- possible long wait here
                           case val of -- TODO this read/write MVars should be combined!
-                             PromiseInMemory v utc thedyn -> 
+                             PromiseInMemory v _utc thedyn -> 
                                      case thedyn of
                                        Just thedynvalue -> 
                                          case fromDynamic thedynvalue of
@@ -810,7 +814,7 @@ readPromise thepromise@(PromiseBasic prhost prid) =
                                                      return extracted
                              PromiseException _ -> taskError $ "Redemption of promise failed"
                              PromiseOnDisk fp -> do mpd <- liftTask $ undiskify fp mv
-                                                    liftTask $ spawnLocal $ diskify fp mv False
+                                                    _ <- liftTask $ spawnLocal $ diskify fp mv False
                                                     case mpd of
                                                        Just dat -> extractFromPayload dat
                                                        _ -> taskError "Promise extraction from disk failed"
@@ -818,7 +822,7 @@ readPromise thepromise@(PromiseBasic prhost prid) =
                                      case out of
                                        Just r -> return r
                                        Nothing -> taskError "Unexpected payload type"
-           complain prhost fprhost prid =
+           complain fprhost prid =
                      do master <- getMaster
                         response <- roundtrip master (MmComplain fprhost prid)
                         case response of 
@@ -927,7 +931,7 @@ shuffle q =
 chunkify :: Int -> [a] -> [[a]] 
 chunkify numChunks l 
   | numChunks <= 0 = taskError "Can't chunkify into less than one chunk"
-  | otherwise = splitSize (ceiling $ fromIntegral (length l) / fromIntegral numChunks) l
+  | otherwise = splitSize (ceiling ((fromIntegral (length l) / fromIntegral numChunks) :: Double)) l
    where
       splitSize _ [] = []
       splitSize i v = let (first,second) = splitAt i v 

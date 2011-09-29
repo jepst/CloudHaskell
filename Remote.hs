@@ -24,7 +24,7 @@ module Remote ( -- * The process layer
                 expect, receive, receiveWait, receiveTimeout,
                 match, matchIf, matchUnknown, matchUnknownThrow, matchProcessDown,
 
-                logS, say, LogSphere(..), LogTarget(..), LogFilter(..), LogConfig(..), LogLevel(..),
+                logS, say, LogSphere, LogTarget(..), LogFilter(..), LogConfig(..), LogLevel(..),
                 setLogConfig, setNodeLogConfig, getLogConfig, defaultLogConfig, getCfgArgs,
 
                 UnknownMessageException(..), ServiceException(..), 

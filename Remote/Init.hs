@@ -3,14 +3,16 @@
 -- line arguments, and commonly-used system processes.
 module Remote.Init (remoteInit) where
 
+import qualified Prelude as Prelude
+import Prelude hiding (lookup)
+
 import Remote.Peer (startDiscoveryService)
 import Remote.Task (__remoteCallMetaData)
-import Remote.Process (startProcessRegistryService,suppressTransmitException,pbracket,localRegistryRegisterNode,localRegistryHello,localRegistryUnregisterNode,
+import Remote.Process (startProcessRegistryService,suppressTransmitException,localRegistryRegisterNode,localRegistryHello,localRegistryUnregisterNode,
                        startProcessMonitorService,startNodeMonitorService,startLoggingService,startSpawnerService,ProcessM,readConfig,initNode,startLocalRegistry,
                        forkAndListenAndDeliver,waitForThreads,roleDispatch,Node,runLocalProcess,performFinalization,startFinalizerService)
 import Remote.Reg (registerCalls,RemoteCallMetaData)
 
-import System.FilePath (FilePath)
 import System.Environment (getEnvironment)
 import Control.Concurrent (threadDelay)
 import Control.Monad.Trans (liftIO)
@@ -30,7 +32,7 @@ startServices =
 
 dispatchServices :: MVar Node -> IO ()
 dispatchServices node = do mv <- newEmptyMVar
-                           runLocalProcess node (startServices >> liftIO (putMVar mv ()))
+                           _ <- runLocalProcess node (startServices >> liftIO (putMVar mv ()))
                            takeMVar mv
 
 -- | This is the usual way create a single node of distributed program.
@@ -65,6 +67,6 @@ remoteInit defaultConfig metadata f =
           (roleDispatch node userFunction >> waitForThreads node) `finally` (performFinalization node)
           threadDelay 500000 -- TODO make configurable, or something
    where  getConfigFileName = do env <- getEnvironment
-                                 return $ maybe defaultConfig Just (lookup "RH_CONFIG" env)
+                                 return $ maybe defaultConfig Just (Prelude.lookup "RH_CONFIG" env)
           userFunction s = localRegistryHello >> localRegistryRegisterNode >> f s
 

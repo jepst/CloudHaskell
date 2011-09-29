@@ -24,6 +24,9 @@ module Remote.Encoding (
           genericPut,
           genericGet) where
 
+import Prelude hiding (id)
+import qualified Prelude as Prelude
+
 import Data.Binary (Binary,encode,decode,Put,Get,put,get,putWord8,getWord8)
 import Control.Monad (liftM)
 import Data.ByteString.Lazy (ByteString)
@@ -115,7 +118,7 @@ serialDecodePure a = (\id ->
                         if (decode $! payloadType a) == 
                               show (typeOf $ id undefined)
                           then Just (id $! decode pc)
-                          else Nothing ) id
+                          else Nothing ) Prelude.id
 
 
 serialDecode :: (Serializable a) => Payload -> IO (Maybe a)
@@ -128,7 +131,7 @@ serialDecode a = (\id ->
                                  case res of
                                   Left _ -> return $ Nothing
                                   Right v -> return $ Just $ id v
-                         else return Nothing ) id
+                         else return Nothing ) Prelude.id
 
 
 -- | Data types that can be used in messaging must
@@ -164,7 +167,7 @@ genericGet = generic `extR` genericString
                                      g' <- genericGet
                                      return $ n' g')
                            (return)
-                           (repConstr (dataTypeOf (id undefined)) constr_rep)) id
+                           (repConstr (dataTypeOf (id undefined)) constr_rep)) Prelude.id
          genericString :: Get String
          genericString = do q <- get
                             return $ decode q

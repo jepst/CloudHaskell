@@ -15,7 +15,7 @@ import Control.Monad (liftM)
 import Data.Maybe (isJust)
 import Remote.Closure (Closure(..))
 import Remote.Process (ProcessM)
-import Remote.Reg (Lookup,putReg,RemoteCallMetaData)
+import Remote.Reg (putReg,RemoteCallMetaData)
 import Remote.Task (TaskM,serialEncodeA,serialDecodeA)
 
 ----------------------------------------------
@@ -284,10 +284,13 @@ getType name =
        VarI iname itype _ _ -> return $ Just (iname,itype)
        _ -> return Nothing
 
+putParams :: [Type] -> Type
 putParams (afst:lst:[]) = AppT (AppT ArrowT afst) lst
 putParams (afst:[]) = afst
 putParams (afst:lst) = AppT (AppT ArrowT afst) (putParams lst)
 putParams [] = error "Unexpected parameter type in remotable processing"
+
+getParams :: Type -> [Type]
 getParams typ = case typ of
                             AppT (AppT ArrowT b) c -> b : getParams c
                             b -> [b]

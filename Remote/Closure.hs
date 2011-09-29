@@ -27,7 +27,7 @@ data Closure a = Closure String Payload
 
 instance Show (Closure a) where
      show a = case a of
-                (Closure fn pl) -> show fn
+                (Closure fn _pl) -> show fn
 
 instance Binary (Closure a) where
      get = do s <- get

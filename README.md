@@ -164,6 +164,8 @@ I am grateful for the contributions of the following people to this project:
  
 * Alan Mycroft
 * Andrew P. Black
+* Conrad Parker
+* Dylan Lukes
 * John Hughes 
 * John Launchbury 
 * Koen Claessen 

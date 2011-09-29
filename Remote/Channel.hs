@@ -17,7 +17,7 @@ module Remote.Channel (
                        terminateChannel) where
 
 import Remote.Process (ProcessM,send,getMessageType,getMessagePayload,setDaemonic,getProcess,prNodeRef,getNewMessageLocal,localFromPid,isPidLocal,TransmitException(..),TransmitStatus(..),spawnLocalAnd,ProcessId,Node,UnknownMessageException(..))
-import Remote.Encoding (getPayloadType,serialDecodePure,Serializable)
+import Remote.Encoding (Serializable)
 
 import Data.List (foldl')
 import Data.Binary (Binary,get,put)
