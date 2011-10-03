@@ -5,7 +5,7 @@ Description:         Fault-tolerant distributed computing framework
 synopsis:            Cloud Haskell
 License:             BSD3
 License-file:        LICENSE
-Extra-Source-Files:  README
+Extra-Source-Files:  README.md
 Author:              Jeff Epstein <jee36@cam.ac.uk>
 Maintainer:          Jeff Epstein <jee36@cam.ac.uk>
 Build-Type:          Simple
