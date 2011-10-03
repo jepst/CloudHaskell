@@ -12,12 +12,11 @@ import Language.Haskell.TH
 import Remote.Encoding (Payload,serialDecode,serialEncode,serialEncodePure)
 import Control.Monad.Trans (liftIO)
 import Control.Monad (liftM)
+import Data.Maybe (isJust)
 import Remote.Closure (Closure(..))
 import Remote.Process (ProcessM)
-import Remote.Reg (Lookup,putReg,RemoteCallMetaData)
-import Remote.Task (remoteCallRectify,TaskM)
-
--- TODO this module is the result of months of tiny thoughtless changes and desperately needs a clean-up
+import Remote.Reg (putReg,RemoteCallMetaData)
+import Remote.Task (TaskM,serialEncodeA,serialDecodeA)
 
 ----------------------------------------------
 -- * Compile-time metadata
@@ -41,7 +40,6 @@ mkClosure n = do info <- reify n
                               _ -> error $ "Unexpected type of closure symbol for "++show n
                     _ -> error $ "No closure corresponding to "++show n
 
-
 -- | A variant of 'mkClosure' suitable for expanding closures
 -- of functions declared in the same module, including that
 -- of the function it's used in. The Rec stands for recursive.
@@ -53,27 +51,185 @@ mkClosure n = do info <- reify n
 -- that may be an argument of mkClosureRec
 mkClosureRec :: Name -> Q Exp
 mkClosureRec name =
-  do loc <- location
-     info <- reify name
-     case info of
+ do e <- makeEnv
+    inf <- reify name
+    case inf of
        VarI aname atype _ _ -> 
-        let modname = case nameModule aname of
-                        Just a -> a
-                        _ -> error "Non-module name at mkClosureRec "++show name
-         in
-           case modname == loc_module loc of
-             True -> let implFqn = loc_module loc ++"." ++ nameBase aname ++ "__impl" 
-                         closurecall = [e| Remote.Closure.Closure |]
-                         encodecall = [e| Remote.Encoding.serialEncodePure |]
-                         paramnames = map (\x -> 'a' : show x) [1..(length (init arglist))]
-                         arglist = getParams atype
-                         paramnamesP = (map (varP . mkName) paramnames)
-                         paramnamesE = (map (varE . mkName) paramnames)
-                         paramnamesT = map (\(v,t) -> sigE v (return t)) (zip paramnamesE arglist)
-                      in lamE paramnamesP (appE (appE closurecall (litE (stringL implFqn))) (appE encodecall (tupE paramnamesT)))
-             False -> error $ show aname++": mkClosureRec can only make closures of functions in the same module; use mkClosure instead"
-       _ -> error $ "Unexpected type of symbol for "++show name
+          case nameModule aname of
+             Just a -> case a == loc_module (eLoc e) of
+                           False -> error "Can't use mkClosureRec across modules: use mkClosure instead"
+                           True -> do (aat,aae) <- closureInfo e aname atype
+                                      sigE (return aae) (return aat)
+             _ -> error "mkClosureRec can't figure out module of symbol"
+       _ -> error "mkClosureRec applied to something weird"
+
+
+closureInfo :: Env -> Name -> Type -> Q (Type,Exp)
+closureInfo e named typed = 
+  do v <- theval
+     return (thetype,v)
+   where
+     implFqn = loc_module (eLoc e) ++ "." ++ nameBase named ++ "__0__impl"
+     (params, returns) = getReturns typed 0
+     wrapit x = case isArrowType e x of
+                    False -> AppT (eClosureT e) x
+                    True -> wrapMonad e (eClosureT e) x
+     thetype = putParams (params ++ [wrapit (putParams returns)])
+     theval = lamE (map varP paramnames) (appE (appE [e|Closure|] (litE (stringL implFqn))) (appE [e|serialEncodePure|] (tupE (map varE paramnames))))
+     paramnames = map (\x -> mkName $ 'a' : show x) [1..(length params)]
+
+closureDecs :: Env -> Name -> Type -> Q [Dec]
+closureDecs e n t =
+  do (nt,ne) <- closureInfo e n t
+     sequence [sigD closureName (return nt),
+               funD closureName [clause [] (normalB $ return ne) []]]
+  where closureName = mkName $ nameBase n ++ "__closure"
+
      
+data Env = Env
+  { eProcessM :: Type
+  , eIO :: Type
+  , eTaskM :: Type
+  , ePayload :: Type
+  , eLoc :: Loc
+  , eLiftIO :: Exp
+  , eReturn :: Exp
+  , eClosure :: Exp
+  , eClosureT :: Type
+  }
+
+makeEnv :: Q Env
+makeEnv = 
+  do eProcessM <- [t| ProcessM |]
+     eIO <- [t| IO |]
+     eTaskM <- [t| TaskM |]
+     eLoc <- location
+     ePayload <- [t| Payload |]
+     eLiftIO <- [e|liftIO|]
+     eReturn <- [e|return|]
+     eClosure <- [e|Closure|]
+     eClosureT <- [t|Closure|]
+     return Env {
+                  eProcessM=eProcessM,
+                  eIO = eIO,
+                  eTaskM = eTaskM,
+                  eLoc = eLoc,
+                  ePayload=ePayload,
+                  eLiftIO=eLiftIO,
+                  eReturn=eReturn,
+                  eClosure=eClosure,
+                  eClosureT=eClosureT
+                }
+
+isMonad :: Env -> Type -> Bool
+isMonad e t
+  = t == eProcessM e
+    || t == eIO e
+    || t == eTaskM e
+
+monadOf :: Env -> Type -> Maybe Type
+monadOf e (AppT m _) |  isMonad e m = Just m
+monadOf e _ = Nothing
+
+restOf :: Env -> Type -> Type
+restOf e (AppT m r ) | isMonad e m = r
+restOf e r = r
+
+wrapMonad :: Env -> Type -> Type -> Type
+wrapMonad e monad val =
+  case monadOf e val of
+    Just t | t == monad -> val
+    Just n -> AppT monad (restOf e val)
+    Nothing -> AppT monad val
+
+getReturns :: Type -> Int -> ([Type],[Type])
+getReturns t shift = splitAt ((length arglist - 1) - shift) arglist
+  where arglist = getParams t
+
+countReturns :: Type -> Int
+countReturns t = length $ getParams t
+
+applyArgs :: Exp -> [Exp] -> Exp
+applyArgs f [] = f
+applyArgs f (l:r) = applyArgs (AppE f l) r
+
+isArrowType :: Env -> Type -> Bool
+isArrowType _ (AppT (AppT ArrowT _) _) = True 
+isArrowType e t | (isJust $ monadOf e t) && isArrowType e (restOf e t) = True
+isArrowType _ _ = False
+
+generateDecl :: Env -> Name -> Type -> Int -> Q [Dec]
+generateDecl e name t shift =
+   let
+     implName = mkName (nameBase name ++ "__" ++ show shift ++ "__impl") 
+     implPlName = mkName (nameBase name ++ "__" ++ show shift ++ "__implPl")
+     (params,returns) = getReturns t shift
+     topmonad = case monadOf e $ last returns of
+                 Just p | p == (eTaskM e) -> eTaskM e
+                 _ -> eProcessM e
+     lifter :: Exp -> ExpQ
+     lifter x = case monadOf e $ putParams returns of
+                 Just p | p == topmonad -> return x
+                 Just p | p == eIO e -> return $ AppE (eLiftIO e) x
+                 _ -> return $ AppE (eReturn e) x
+     serialEncoder x = case topmonad of
+                 p | p == eTaskM e -> appE [e|serialEncodeA|] x
+                 _ -> appE [e|liftIO|] (appE [e|serialEncode|] x)
+     serialDecoder x = case topmonad of
+                 p | p == eTaskM e -> appE [e|serialDecodeA|] x
+                 _ -> appE [e|liftIO|] (appE [e|serialDecode|] x)
+     paramnames = map (\x -> 'a' : show x) [1..(length params)]
+     paramnamesP = (map (varP . mkName) paramnames)
+     paramnamesE = (map (VarE . mkName) paramnames)
+
+     just a = conP (mkName "Prelude.Just") [a]
+
+     impldec = sigD implName (appT (appT arrowT (return (ePayload e))) (return $ wrapMonad e topmonad $ putParams returns))
+     impldef = funD implName [clause [varP (mkName "a")]
+                 (normalB (doE [bindS (varP (mkName "res")) ((serialDecoder (varE (mkName "a")))),
+                                noBindS (caseE (varE (mkName "res"))
+                                        [match (just (tupP paramnamesP)) (normalB (lifter (applyArgs (VarE name) paramnamesE))) [],
+                                         match wildP (normalB (appE [e|error|] (litE (stringL ("Bad decoding in closure splice of "++nameBase name))))) []])
+                                      ]))
+                      []]
+     implPldec = sigD implPlName (return $ putParams $ [ePayload e,wrapMonad e topmonad (ePayload e)] )
+     implPldef = funD implPlName [clause [varP (mkName "a")]
+                                         (normalB (doE [bindS (varP (mkName "res")) ( (appE (varE implName) (varE (mkName "a")))),
+                                                       noBindS ((serialEncoder (varE (mkName "res")))) ] )) [] ] 
+     base1 = [impldec,impldef]
+     base2 = if isArrowType e $ putParams returns 
+                then []
+                else [implPldec,implPldef]
+  in do cld <- closureDecs e name t
+        sequence $ base1++base2++(map return cld)
+
+
+generateDecls :: Env -> Name -> Q [Dec]
+generateDecls e name = 
+   do tr <- getType name
+      case tr of
+        Nothing -> error "remotable applied to bad name"
+        Just (fname,ftype) ->
+-- Change the following line to: [0..countReturns ftype - 1]
+-- to automatically enable partial closure generators
+            liftM concat $ mapM (generateDecl e fname ftype) [0]
+
+generateMetaData :: Env -> [Dec] -> Q [Dec]
+generateMetaData e decls = sequence [sig,dec]
+  where regDecls [] = []
+        regDecls (first:rest) =
+           case first of
+              SigD named _ -> named : (regDecls rest)
+              _ -> regDecls rest
+        registryName = (mkName "__remoteCallMetaData")
+        paramName = mkName "x"
+        sig = sigD registryName [t| RemoteCallMetaData |]
+        dec = funD registryName [clause [varP paramName] (normalB (toChain (regDecls decls))) []]
+        fqn n = (maybe (loc_module (eLoc e)++".") ((flip (++))".") (nameModule n)) ++ nameBase n
+        app2E op l r = appE (appE op l) r
+        toChain [] = varE paramName
+        toChain [h] = appE (app2E [e|putReg|] (varE h) (litE $ stringL (fqn h))) (varE paramName)
+        toChain (h:t) = appE (app2E [e|putReg|] (varE h) (litE $ stringL (fqn h))) (toChain t)           
 
 -- | A compile-time macro to provide easy invocation of closures.
 -- To use this, follow the following steps:
@@ -117,121 +273,24 @@ mkClosureRec name =
 -- > val <- callRemotePure someNode (badFib__closure 5)
 remotable :: [Name] -> Q [Dec]
 remotable names =
-    do info <- liftM concat $ mapM getType names 
-       loc <- location
-       declGen <- mapM (makeDec loc) info
-       decs <- sequence $ concat (map fst declGen)
-       let outnames = concat $ map snd declGen
-       regs <- sequence $ makeReg loc outnames
-       return $ decs ++ regs
-    where makeReg loc names = 
-              let
-                      mkentry = [e| putReg |]
-                      regtype = [t| RemoteCallMetaData |]
-                      registryName = (mkName "__remoteCallMetaData")
-                      reasonableNameModule name = maybe (loc_module loc++".") ((flip (++))".") (nameModule name)
-                      app2E op l r = appE (appE op l) r
-                      param = mkName "x"
-                      applies [] = varE param
-                      applies [h] = appE (app2E mkentry (varE h) (litE $ stringL (reasonableNameModule h++nameBase h))) (varE param)
-                      applies (h:t) = appE (app2E mkentry (varE h) (litE $ stringL (reasonableNameModule h++nameBase h))) (applies t)
-                      bodyq = normalB (applies names)
-                      sig = sigD registryName regtype
-                      dec = funD registryName [clause [varP param] bodyq []]
-               in [sig,dec]
-          makeDec loc (aname,atype) =
-              do payload <- [t| Payload |]
-                 ttprocessm <- [t| ProcessM |]
-                 tttaskm <- [t| TaskM |]
-                 ttclosure <- [t| Closure |]
-                 ttio <- [t| IO |]
-                 return $ let
-                    implName = mkName (nameBase aname ++ "__impl") 
-                    implPlName = mkName (nameBase aname ++ "__implPl")
-                    implFqn = loc_module loc ++"." ++ nameBase aname ++ "__impl"
-                    closureName = mkName (nameBase aname ++ "__closure")
-                    paramnames = map (\x -> 'a' : show x) [1..(length (init arglist))]
-                    paramnamesP = (map (varP . mkName) paramnames)
-                    paramnamesE = (map (varE . mkName) paramnames)
-                    closurearglist = init arglist ++ [processmtoclosure (last arglist)]
-                    implarglist = payload : [toPayload (last arglist)]
-                    toProcessM a = (AppT ttprocessm a)
-                    toPayload x = case funtype of
-                                     0 -> case x of
-                                           (AppT (ConT n) _) -> (AppT (ConT n) payload)
-                                           _ -> toProcessM payload
-                                     _ -> toProcessM payload
-                    processmtoclosure (AppT mc x) | mc == ttprocessm && isarrow x = AppT ttclosure x
-                    processmtoclosure (x) =  (AppT ttclosure x)
-                    isarrowful = isarrow $ last arglist
-                    isarrow (AppT (AppT ArrowT _) _) = True
-                    isarrow (AppT (process) v) 
-                        | isarrow v && (process == tttaskm || process == ttprocessm) = True
-                    isarrow _ = False
-                    applyargs f [] = f
-                    applyargs f (l:r) = applyargs (appE f l) r
-                    funtype = case last arglist of
-                                 (AppT (process) _) |  process == ttprocessm -> 0
-                                                    |  process == ttio -> 1
-                                 _ -> 2
-                    just a = conP (mkName "Prelude.Just") [a]
-                    errorcall = [e| Prelude.error |]
-                    liftio = [e| Control.Monad.Trans.liftIO |]
-                    returnf = [e| Prelude.return |]
-                    asProcessM x = case funtype of
-                                     0 -> x
-                                     1 -> case x of
-                                            (AppT (ConT _) a) -> AppT ttprocessm a
-                                            _ -> AppT ttprocessm x
-                                     2 -> AppT ttprocessm x
-                    lifter x = case funtype of
-                                   0 -> x
-                                   1 -> appE liftio x
-                                   _ -> appE returnf x
-                    decodecall = [e| Remote.Encoding.serialDecode |]
-                    encodecallio = [e| Remote.Encoding.serialEncode |]
-                    encodecall = [e| Remote.Encoding.serialEncodePure |]
-                    closurecall = [e| Remote.Closure.Closure |]
-                    closuredec = sigD closureName (return $ putParams closurearglist)
-                    closuredef = funD closureName [clause paramnamesP
-                                           (normalB (appE (appE closurecall (litE (stringL implFqn))) (appE encodecall (tupE paramnamesE))))
-                                           []
-                                          ]
-                    impldec = sigD implName (appT (appT arrowT (return payload)) (return $ asProcessM $ last arglist))
-                    impldef = funD implName [clause [varP (mkName "a")]
-                                            (normalB (doE [bindS (varP (mkName "res")) (appE liftio (appE decodecall (varE (mkName "a")))),
-                                                          noBindS (caseE (varE (mkName "res"))
-                                                                [match (just (tupP paramnamesP)) (normalB (lifter (applyargs (varE aname) paramnamesE))) [],
-                                                                 match wildP (normalB (appE (errorcall) (litE (stringL ("Bad decoding in closure splice of "++nameBase aname))))) []])
-                                                         ]))
-                                            []]
-                    implPls = if isarrowful then [implPldec,implPldef] else []
-                    implPldec = case last arglist of
-                                 (AppT ( process) v) |  process == tttaskm ->
-                                      sigD implPlName (return $ putParams $ [payload,(AppT process payload)])
-                                 _ -> sigD implPlName (return $ putParams implarglist)
-                    implPldef = case last arglist of
-                                 (AppT ( process) _) |  process == tttaskm ->
-                                      funD implPlName [clause [varP (mkName "a")]
-                                                     (normalB (appE [e| remoteCallRectify |] (appE (varE implName) (varE (mkName "a") )))) []
-                                           ]
-                                 _ -> funD implPlName [clause [varP (mkName "a")]
-                                         (normalB (doE [bindS (varP (mkName "res")) ( (appE (varE implName) (varE (mkName "a")))),
-                                                       noBindS (appE liftio (appE encodecallio (varE (mkName "res")))) ] )) [] ] 
-                    arglist = getParams atype
-                  in ([closuredec,closuredef,impldec,impldef]++if not isarrowful then [implPldec,implPldef] else [],
-                              [aname,implName]++if not isarrowful then [implPlName] else [])
- 
+   do env <- makeEnv
+      newDecls <- liftM concat $ mapM (generateDecls env) names
+      lookup <- generateMetaData env newDecls
+      return $ newDecls ++ lookup
+
 getType name = 
   do info <- reify name
      case info of 
-       VarI iname itype _ _ -> return [(iname,itype)]
-       _ -> return []
+       VarI iname itype _ _ -> return $ Just (iname,itype)
+       _ -> return Nothing
 
+putParams :: [Type] -> Type
 putParams (afst:lst:[]) = AppT (AppT ArrowT afst) lst
 putParams (afst:[]) = afst
 putParams (afst:lst) = AppT (AppT ArrowT afst) (putParams lst)
 putParams [] = error "Unexpected parameter type in remotable processing"
+
+getParams :: Type -> [Type]
 getParams typ = case typ of
                             AppT (AppT ArrowT b) c -> b : getParams c
                             b -> [b]
