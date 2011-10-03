@@ -11,13 +11,30 @@ Maintainer:          Jeff Epstein <jee36@cam.ac.uk>
 Build-Type:          Simple
 tested-with:         GHC ==6.12.1
 
+extra-source-files:
+    examples/kmeans/KMeans.hs
+    examples/kmeans/KMeans3.hs
+    examples/kmeans/KMeansCommon.hs
+    examples/kmeans/MakeData.hs
+    examples/kmeans/awsgo
+    examples/kmeans/awskill
+    examples/kmeans/awslist
+    examples/kmeans/kmeans
+    examples/pi/Pi6.hs
+    examples/pi/Pi7.hs
+    examples/pi/PiCommon.hs
+    examples/tests/Test-Call.hs
+    examples/tests/Test-Channel-Merge.hs
+    examples/tests/Test-Channel.hs
+    examples/tests/Test-Closure.hs
+    examples/tests/Test-MapReduce.hs
+    examples/tests/Test-Message.hs
+    examples/tests/Test-Task.hs
+    examples/tests/config
+
 library
   Build-Depends:       base >= 4, time, filepath, containers, network, syb, mtl, binary, bytestring, template-haskell, stm, pureMD5, utf8-string, directory
   ghc-options:         -Wall
   Extensions:          TemplateHaskell, FlexibleInstances, UndecidableInstances, CPP, ExistentialQuantification, DeriveDataTypeable
   Exposed-Modules:     Remote.Process, Remote.Encoding, Remote.Call, Remote.Reg, Remote.Peer, Remote.Init, Remote.Closure, Remote.Channel, Remote.Task, Remote
 
-executable pi6
-  Main-is:           pi/Pi6.hs
-  Hs-source-dirs:    examples
-  Build-Depends:     base == 4.*, containers, array == 0.3.*, remote
