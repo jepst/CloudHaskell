@@ -10,6 +10,7 @@ Author:              Jeff Epstein <jee36@cam.ac.uk>
 Maintainer:          Jeff Epstein <jee36@cam.ac.uk>
 Build-Type:          Simple
 tested-with:         GHC ==6.12.1
+Category:            Distributed Computing
 
 extra-source-files:
     examples/kmeans/KMeans.hs
