@@ -10,8 +10,9 @@ import Prelude hiding (all, pi)
 
 import Network.Socket (defaultHints,sendTo,recv,sClose,Socket,getAddrInfo,AddrInfoFlag(..),setSocketOption,addrFlags,addrSocketType,addrFamily,SocketType(..),Family(..),addrProtocol,SocketOption(..),AddrInfo,bindSocket,addrAddress,SockAddr(..),socket)
 import Network.BSD (getProtocolNumber)
+import qualified Control.Exception.Control as Control (try)
 import Control.Concurrent.MVar (takeMVar, newMVar, modifyMVar_)
-import Remote.Process (PeerInfo,pingNode,makeNodeFromHost,spawnLocalAnd,setDaemonic,TransmitStatus(..),TransmitException(..),PayloadDisposition(..),ptimeout,getSelfNode,sendSimple,cfgRole,cfgKnownHosts,cfgPeerDiscoveryPort,match,receiveWait,getSelfPid,getConfig,NodeId,PortId,ProcessM,ptry,localRegistryQueryNodes)
+import Remote.Process (PeerInfo,pingNode,makeNodeFromHost,spawnLocalAnd,setDaemonic,TransmitStatus(..),TransmitException(..),PayloadDisposition(..),ptimeout,getSelfNode,sendSimple,cfgRole,cfgKnownHosts,cfgPeerDiscoveryPort,match,receiveWait,getSelfPid,getConfig,NodeId,PortId,ProcessM,localRegistryQueryNodes)
 import Control.Monad.Trans (liftIO)
 import Data.Typeable (Typeable)
 import Data.Maybe (catMaybes)
@@ -142,7 +143,7 @@ waitForDiscovery delay
                    do cfg <- getConfig
                       msg <- liftIO $ listenUdp (cfgPeerDiscoveryPort cfg)
                       nodeid <- getSelfNode
-                      res <- ptry $ sendSimple (read msg) (DiscoveryInfo {discNodeId=nodeid,discRole=cfgRole cfg}) PldUser
+                      res <- Control.try $ sendSimple (read msg) (DiscoveryInfo {discNodeId=nodeid,discRole=cfgRole cfg}) PldUser
                                  :: ProcessM (Either ErrorCall TransmitStatus)
                       case res of
                          Right QteOK -> return True

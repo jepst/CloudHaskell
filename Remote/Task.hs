@@ -29,7 +29,7 @@ module Remote.Task (
 
 import Remote.Reg (putReg,getEntryByIdent,RemoteCallMetaData)
 import Remote.Encoding (serialEncodePure,hGetPayload,hPutPayload,Payload,getPayloadContent,Serializable,serialDecode,serialEncode)
-import Remote.Process (roundtripQuery, ServiceException(..), TransmitStatus(..),diffTime,getConfig,Config(..),matchProcessDown,terminate,nullPid,monitorProcess,TransmitException(..),MonitorAction(..),ptry,LogConfig(..),getLogConfig,setNodeLogConfig,nodeFromPid,LogLevel(..),LogTarget(..),logS,getLookup,say,LogSphere,NodeId,ProcessM,ProcessId,PayloadDisposition(..),getSelfPid,getSelfNode,matchUnknownThrow,receiveWait,receiveTimeout,roundtripResponse,roundtripResponseAsync,roundtripQueryImpl,match,makePayloadClosure,spawn,spawnLocal,spawnLocalAnd,setDaemonic,send,makeClosure)
+import Remote.Process (roundtripQuery, ServiceException(..), TransmitStatus(..),diffTime,getConfig,Config(..),matchProcessDown,terminate,nullPid,monitorProcess,TransmitException(..),MonitorAction(..),LogConfig(..),getLogConfig,setNodeLogConfig,nodeFromPid,LogLevel(..),LogTarget(..),logS,getLookup,say,LogSphere,NodeId,ProcessM,ProcessId,PayloadDisposition(..),getSelfPid,getSelfNode,matchUnknownThrow,receiveWait,receiveTimeout,roundtripResponse,roundtripResponseAsync,roundtripQueryImpl,match,makePayloadClosure,spawn,spawnLocal,spawnLocalAnd,setDaemonic,send,makeClosure)
 import Remote.Closure (Closure(..))
 import Remote.Peer (getPeers)
 
@@ -41,6 +41,7 @@ import Control.Exception (SomeException,Exception,throw)
 import Data.Typeable (Typeable)
 import Control.Monad (liftM,when)
 import Control.Monad.Trans (liftIO)
+import qualified Control.Exception.Control as Control (try)
 import Control.Concurrent.MVar (MVar,modifyMVar,modifyMVar_,newMVar,newEmptyMVar,takeMVar,putMVar,readMVar,withMVar)
 import qualified Data.Map as Map (Map,insert,lookup,empty,insertWith',toList)
 import Data.List ((\\),union,nub,groupBy,sortBy,delete)
@@ -284,7 +285,7 @@ serialDecodeA = liftTask . liftIO . serialDecode
 
 monitorTask :: ProcessId -> ProcessId -> ProcessM TransmitStatus
 monitorTask monitor monitee
-   = do res <- ptry $ monitorProcess monitor monitee MaMonitor 
+   = do res <- Control.try $ monitorProcess monitor monitee MaMonitor
         case res of
            Right _ -> return QteOK
            Left (ServiceException e) -> return $ QteOther e
@@ -367,7 +368,7 @@ undiskify fpIn mps =
                    return (inmem,Just pl)
               PromiseInMemory payload _ _ -> return (val,Just payload)
               _ -> return (val,Nothing))
-  where wrap a = do res <- ptry a
+  where wrap a = do res <- Control.try a
                     case res of
                       Left e -> do logS "TSK" LoCritical $ "Error reading promise from file "++fpIn++": "++show (e::IOError)
                                    return Nothing
@@ -395,7 +396,7 @@ diskify fp mps reallywrite =
               when again
                  (diskify fp mps reallywrite)
          tmp = fp ++ ".tmp"
-         wrap a = do res <- ptry a
+         wrap a = do res <- Control.try a
                      case res of
                          Left z -> do logS "TSK" LoImportant $ "Error writing promise to disk on file "++fp++": "++show (z::IOError)
                                       return False
@@ -426,7 +427,7 @@ startNodeWorker masterpid nbs mps clo@(Closure cloname cloarg) =
                                              let cachefile = cfgPromisePrefix cfg++hashClosure clo
                                              liftTask $ diskify cachefile mps True
                               Nothing -> taskError $ "Failed looking up "++cloname++" in closure table"
-             in do res <- ptry $ runTaskM tasker initialState :: ProcessM (Either SomeException (TaskState,()))
+             in do res <- Control.try $ runTaskM tasker initialState :: ProcessM (Either SomeException (TaskState,()))
                    case res of
                      Left ex -> liftIO (putMVar mps (PromiseException (show ex))) >> throw ex
                      Right _ -> return ()
@@ -548,7 +549,7 @@ findPeers :: ProcessM [(String,NodeId)]
 findPeers = liftM (concat . (map (\(role,v) -> [ (role,x) | x <- v] )) . Map.toList) getPeers
 
 sendSilent :: (Serializable a) => ProcessId -> a -> ProcessM ()
-sendSilent pid a = do res <- ptry $ send pid a
+sendSilent pid a = do res <- Control.try $ send pid a
                       case res of
                         Left (TransmitException _) -> return ()
                         Right _ -> return ()
