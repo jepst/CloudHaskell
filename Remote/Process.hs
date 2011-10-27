@@ -72,6 +72,8 @@ import Control.Concurrent.MVar (MVar,newMVar, newEmptyMVar,takeMVar,putMVar,modi
 import Control.Exception (ErrorCall(..),throwTo,bracket,try,Exception,throw,evaluate,finally,SomeException,catch)
 import Control.Monad (foldM,when,liftM,forever)
 import Control.Monad.Trans (MonadIO,liftIO)
+import Control.Monad.IO.Control (MonadControlIO, liftControlIO)
+import Data.Functor ((<$>))
 import Data.Binary (Binary,put,get,putWord8,getWord8)
 import Data.Char (isSpace,isDigit)
 import Data.List (isSuffixOf,foldl', isPrefixOf)
@@ -284,6 +286,11 @@ instance Functor ProcessM where
 
 instance MonadIO ProcessM where
     liftIO arg = ProcessM $ \pr -> (arg >>= (\x -> return (pr,x)))
+
+instance MonadControlIO ProcessM where
+    liftControlIO f = ProcessM $ \p ->
+      let runInIO m = (\t -> ProcessM $ \_ -> return t) <$> runProcessM m p
+      in f runInIO >>= \x -> return (p, x)
 
 getProcess :: ProcessM (Process)
 getProcess = ProcessM $ \x -> return (x,x)
