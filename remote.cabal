@@ -33,6 +33,10 @@ extra-source-files:
     examples/tests/Test-Task.hs
     examples/tests/config
 
+source-repository head
+  Type:     git
+  Location: git://github.com/jepst/CloudHaskell.git
+
 library
   Build-Depends:       base >= 4, time, filepath, containers, network, syb, mtl, binary, bytestring, template-haskell, stm, pureMD5, utf8-string, directory
   ghc-options:         -Wall
