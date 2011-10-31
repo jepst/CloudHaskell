@@ -6,8 +6,8 @@ synopsis:            Cloud Haskell
 License:             BSD3
 License-file:        LICENSE
 Extra-Source-Files:  README.md
-Author:              Jeff Epstein <jee36@cam.ac.uk>
-Maintainer:          Jeff Epstein <jee36@cam.ac.uk>
+Author:              Jeff Epstein <jepst79@gmail.com>
+Maintainer:          Jeff Epstein <jepst79@gmail.com>
 Build-Type:          Simple
 tested-with:         GHC ==6.12.1
 Category:            Distributed Computing
