@@ -23,7 +23,7 @@ module Remote.Process  (
                        setLogConfig,getLogConfig,setNodeLogConfig,setRemoteNodeLogConfig,defaultLogConfig,
 
                        -- * Exception handling
-                       ptry,ptimeout,pbracket,pfinally,
+                       ptimeout,
                        UnknownMessageException(..),ServiceException(..),
                        TransmitException(..),TransmitStatus(..),
 
@@ -72,6 +72,9 @@ import Control.Concurrent.MVar (MVar,newMVar, newEmptyMVar,takeMVar,putMVar,modi
 import Control.Exception (ErrorCall(..),throwTo,bracket,try,Exception,throw,evaluate,finally,SomeException,catch)
 import Control.Monad (foldM,when,liftM,forever)
 import Control.Monad.Trans (MonadIO,liftIO)
+import Control.Monad.IO.Control (MonadControlIO, liftControlIO)
+import qualified Control.Exception.Control as Control (try, bracket, finally)
+import Data.Functor ((<$>))
 import Data.Binary (Binary,put,get,putWord8,getWord8)
 import Data.Char (isSpace,isDigit)
 import Data.List (isSuffixOf,foldl', isPrefixOf)
@@ -285,6 +288,11 @@ instance Functor ProcessM where
 instance MonadIO ProcessM where
     liftIO arg = ProcessM $ \pr -> (arg >>= (\x -> return (pr,x)))
 
+instance MonadControlIO ProcessM where
+    liftControlIO f = ProcessM $ \p ->
+      let runInIO m = (\t -> ProcessM $ \_ -> return t) <$> runProcessM m p
+      in f runInIO >>= \x -> return (p, x)
+
 getProcess :: ProcessM (Process)
 getProcess = ProcessM $ \x -> return (x,x)
 
@@ -478,7 +486,7 @@ receiveWaitImpl m =
 
 convertErrorCall :: ProcessM a -> ProcessM a
 convertErrorCall f =
-   do a <- ptry ff
+   do a <- Control.try ff
       case a of
         Right c -> return c
         Left b -> throw $ TransmitException $ QteOther $ show (b::ErrorCall)
@@ -676,7 +684,7 @@ spawnLocalAnd fun prefix =
                       pid <- liftIO $ runLocalProcess (prNodeRef p) (myFun v)
                       liftIO $ takeMVar v
                       return pid
-   where myFun mv = (prefix `pfinally` liftIO (putMVar mv ())) >> fun
+   where myFun mv = (prefix `Control.finally` liftIO (putMVar mv ())) >> fun
 
 -- | A synonym for 'spawnLocal'
 forkProcess :: ProcessM () -> ProcessM ProcessId
@@ -812,7 +820,7 @@ generalPid (ProcessId n _p) = ProcessId n (-1)
 
 roundtripQuery :: (Serializable a, Serializable b) => PayloadDisposition -> ProcessId -> a -> ProcessM (Either TransmitStatus b)
 roundtripQuery pld pid dat =
-    do res <- ptry $ withMonitor apid $ roundtripQueryImpl 0 pld pid dat Prelude.id []
+    do res <- Control.try $ withMonitor apid $ roundtripQueryImpl 0 pld pid dat Prelude.id []
        case res of
          Left (ServiceException s) -> return $ Left $ QteOther s
          Right (Left a) -> return (Left a)
@@ -940,7 +948,7 @@ sendTry pid msg msghdr pld = getProcess >>= (\_p ->
                 case q of
                    QteThrottle n -> liftIO (threadDelay n) >> timeoutFilter a
                    n -> return n
-          tryAction = ptry action >>=
+          tryAction = Control.try action >>=
                     (\x -> case x of
                               Left l -> return $ QteEncodingError $ show (l::ErrorCall) -- catch errors from encoding
                               Right r -> return r)
@@ -1314,26 +1322,10 @@ isPidLocal pid = do mine <- getSelfPid
 
 suppressTransmitException :: ProcessM a -> ProcessM (Maybe a)
 suppressTransmitException a = 
-     do res <- ptry a
+     do res <- Control.try a
         case res of
           Left (TransmitException _) -> return Nothing
           Right r -> return $ Just r
-
--- | A 'ProcessM'-flavoured variant of 'Control.Exception.try'
-ptry :: (Exception e) => ProcessM a -> ProcessM (Either e a)
-ptry f = do p <- getProcess
-            res <- liftIO $ try (runProcessM f p)
-            case res of
-              Left e -> return $ Left e
-              Right (newp,newanswer) -> ProcessM (\_ -> return (newp,Right newanswer))
-
-{- UNUSED
--- | A 'ProcessM'-flavoured variant of 'Control.Exception.catch'
-pcatch :: Exception e => ProcessM a -> (e -> ProcessM a) -> ProcessM a
-pcatch code handler = do p <- getProcess
-                         liftIO $ catch (liftM snd $ runProcessM code p) (\e -> liftM snd $ runProcessM (handler e) p)
-                         
--}
 
 -- | A 'ProcessM'-flavoured variant of 'System.Timeout.timeout'
 ptimeout :: Int -> ProcessM a -> ProcessM (Maybe a)
@@ -1342,21 +1334,6 @@ ptimeout t f = do p <- getProcess
                   case res of
                     Nothing -> return Nothing
                     Just (newp,newanswer) -> ProcessM (\_ -> return (newp,Just newanswer))
-
--- | A 'ProcessM'-flavoured variant of 'Control.Exception.bracket'
-pbracket :: (ProcessM a) -> (a -> ProcessM b) -> (a -> ProcessM c) -> ProcessM c
-pbracket before after fun = 
-       do p <- getProcess
-          (newp2,newanswer2) <- liftIO $ bracket 
-                         (runProcessM before p) 
-                         (\(newp,newanswer) -> runProcessM (after newanswer) newp) 
-                         (\(newp,newanswer) -> runProcessM (fun newanswer) newp)
-          ProcessM (\_ -> return (newp2, newanswer2))   
-
--- | A 'ProcessM'-flavoured variant of 'Control.Exception.finally'
-pfinally :: ProcessM a -> ProcessM b -> ProcessM a
-pfinally fun after = pbracket (return ()) (\_ -> after) (const fun)
-
 
 ----------------------------------------------
 -- * Configuration file
@@ -1694,7 +1671,7 @@ startLoggingService = serviceThread ServiceLog logger
           do smsg <- liftIO $ showLogMessage txt
              case whereto of
               LtStdout -> liftIO $ putStrLn smsg
-              LtFile fp -> (ptry (liftIO (appendFile fp (smsg ++ "\n"))) :: ProcessM (Either IOError ()) ) >> return () -- ignore error - what can we do?
+              LtFile fp -> (Control.try (liftIO (appendFile fp (smsg ++ "\n"))) :: ProcessM (Either IOError ()) ) >> return () -- ignore error - what can we do?
               LtForward nid -> do self <- getSelfNode
                                   when (self /= nid) 
                                     (sendSimple (adminGetPid nid ServiceLog) (forwardify txt) PldAdmin >> return ()) -- ignore error -- what can we do?
@@ -1853,7 +1830,7 @@ startFinalizerService todo = spawnLocalAnd body prefix >> return ()
                              do p <- getProcess
                                 node <- liftIO $ readMVar (prNodeRef p)
                                 liftIO $ takeMVar (ndNodeFinalizer node)
-                                todo `pfinally` (liftIO $ putMVar (ndNodeFinalized node) ())
+                                todo `Control.finally` (liftIO $ putMVar (ndNodeFinalized node) ())
 
 
 performFinalization :: MVar Node -> IO ()
@@ -1868,7 +1845,7 @@ setDaemonic = do p <- getProcess
                     (\node -> return $ node {ndProcessTable=Map.adjust (\pte -> pte {pteDaemonic=True}) (localFromPid pid) (ndProcessTable node)})
 
 serviceThread :: ServiceId -> ProcessM () -> ProcessM ()
-serviceThread v f = spawnLocalAnd (pbracket (return ())
+serviceThread v f = spawnLocalAnd (Control.bracket (return ())
                              (\_ -> adminDeregister v >> logError)
                              (\_ -> f)) (adminRegister v >> setDaemonic)
                         >> (return()) 
@@ -2242,9 +2219,9 @@ withMonitoring :: ProcessId -> MonitorAction -> ProcessM a -> ProcessM a
 withMonitoring pid how f =  
                         do mypid <- getSelfPid
                            monitorProcess mypid pid how -- TODO if this throws a ServiceException, translate that into a trigger
-                           a <- f `pfinally` safety (unmonitorProcess mypid pid how)
+                           a <- f `Control.finally` safety (unmonitorProcess mypid pid how)
                            return a
-              where safety n = ptry n :: ProcessM (Either ServiceException ()) 
+              where safety n = Control.try n :: ProcessM (Either ServiceException ())
 
 
 -- | Establishes unidirectional processing of another process. The format is:
@@ -2573,7 +2550,7 @@ startSpawnerService = serviceThread ServiceSpawner spawner
    where spawner = receiveWait [matchSpawnRequest,matchCallRequest,matchUnknownThrow] >> spawner
          exceptFilt :: SomeException -> q -> q
          exceptFilt _ q = q
-         callWorker c responder = do a <- ptry $ invokeClosure c
+         callWorker c responder = do a <- Control.try $ invokeClosure c
                                      case a of
                                         Left q -> exceptFilt q (responder Nothing)
                                         Right Nothing -> responder Nothing

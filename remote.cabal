@@ -38,7 +38,7 @@ source-repository head
   Location: git://github.com/jepst/CloudHaskell.git
 
 library
-  Build-Depends:       base >= 4, time, filepath, containers, network, syb, mtl, binary, bytestring, template-haskell, stm, pureMD5, utf8-string, directory
+  Build-Depends:       base >= 4, time, filepath, containers, network, syb, mtl, binary, bytestring, template-haskell, stm, pureMD5, utf8-string, directory, monad-control >= 0.2 && < 0.4
   ghc-options:         -Wall
   Extensions:          TemplateHaskell, FlexibleInstances, UndecidableInstances, CPP, ExistentialQuantification, DeriveDataTypeable
   Exposed-Modules:     Remote.Process, Remote.Encoding, Remote.Call, Remote.Reg, Remote.Peer, Remote.Init, Remote.Closure, Remote.Channel, Remote.Task, Remote
