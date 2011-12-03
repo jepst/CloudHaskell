@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveDataTypeable, MultiParamTypeClasses, TypeFamilies #-}
 
 -- | This module is the core of Cloud Haskell. It provides 
 -- processes, messages, monitoring, and configuration.
@@ -23,7 +23,6 @@ module Remote.Process  (
                        setLogConfig,getLogConfig,setNodeLogConfig,setRemoteNodeLogConfig,defaultLogConfig,
 
                        -- * Exception handling
-                       ptimeout,
                        UnknownMessageException(..),ServiceException(..),
                        TransmitException(..),TransmitStatus(..),
 
@@ -67,13 +66,17 @@ module Remote.Process  (
 import qualified Prelude as Prelude
 import Prelude hiding (catch, id, init, last, lookup, pi)
 
+import Control.Applicative (Applicative(..))
 import Control.Concurrent (forkIO,ThreadId,threadDelay)
 import Control.Concurrent.MVar (MVar,newMVar, newEmptyMVar,takeMVar,putMVar,modifyMVar,modifyMVar_,readMVar)
 import Control.Exception (ErrorCall(..),throwTo,bracket,try,Exception,throw,evaluate,finally,SomeException,catch)
-import Control.Monad (foldM,when,liftM,forever)
+import Control.Monad (foldM,when,liftM,forever,ap,void)
+import Control.Monad.Base (MonadBase(..))
 import Control.Monad.Trans (MonadIO,liftIO)
-import Control.Monad.IO.Control (MonadControlIO, liftControlIO)
-import qualified Control.Exception.Control as Control (try, bracket, finally)
+import Control.Monad.Trans.Control (MonadBaseControl(..))
+import qualified Control.Exception.Lifted  as Lifted (try, bracket, finally)
+import qualified System.Timeout.Lifted     as Lifted (timeout)
+import qualified Control.Concurrent.Lifted as Lifted (fork)
 import Data.Functor ((<$>))
 import Data.Binary (Binary,put,get,putWord8,getWord8)
 import Data.Char (isSpace,isDigit)
@@ -91,7 +94,6 @@ import qualified Data.Map as Map (Map,keys,fromList,unionWith,elems,singleton,me
 import Remote.Reg (getEntryByIdent,Lookup,empty)
 import Remote.Encoding (serialEncode,serialDecode,serialEncodePure,serialDecodePure,dynamicEncodePure,dynamicDecodePure,DynamicPayload,Payload,Serializable,hPutPayload,hGetPayload,getPayloadType,getDynamicPayloadType)
 import System.Environment (getArgs)
-import qualified System.Timeout (timeout)
 import Data.Time (toModifiedJulianDay,Day(..),picosecondsToDiffTime,getCurrentTime,diffUTCTime,UTCTime(..),utcToLocalZonedTime)
 import Remote.Closure (Closure (..))
 import Control.Concurrent.STM (STM,atomically,retry,orElse)
@@ -285,13 +287,22 @@ instance Monad ProcessM where
 instance Functor ProcessM where
     fmap f v = ProcessM $ (\p -> (runProcessM v) p >>= (\x -> return $ fmap f x))
 
-instance MonadIO ProcessM where
-    liftIO arg = ProcessM $ \pr -> (arg >>= (\x -> return (pr,x)))
+instance Applicative ProcessM where
+    pure = return
+    (<*>) = ap
 
-instance MonadControlIO ProcessM where
-    liftControlIO f = ProcessM $ \p ->
-      let runInIO m = (\t -> ProcessM $ \_ -> return t) <$> runProcessM m p
-      in f runInIO >>= \x -> return (p, x)
+instance MonadIO ProcessM where
+    liftIO = liftBase
+
+instance MonadBase IO ProcessM where
+    liftBase io = ProcessM $ \p -> liftM ((,) p) io
+
+instance MonadBaseControl IO ProcessM where
+    newtype StM ProcessM a = StMP {unStMP :: (Process, a)}
+    liftBaseWith f = ProcessM $ \p ->
+                       liftM ((,) p)
+                             (f $ \pm -> liftM StMP $ runProcessM pm p)
+    restoreM = ProcessM . const . return . unStMP
 
 getProcess :: ProcessM (Process)
 getProcess = ProcessM $ \x -> return (x,x)
@@ -450,11 +461,10 @@ receiveWait m = do f <- receiveWaitImpl m
 receiveTimeout :: Int -> [MatchM q ()] -> ProcessM (Maybe q)
 receiveTimeout 0 m = receive m
 receiveTimeout to m | to > 0 = 
-          do res <- ptimeout to $ receiveWaitImpl m
+          do res <- Lifted.timeout to $ receiveWaitImpl m
              case res of
                Nothing -> return Nothing
-               Just f -> do q <- f
-                            return $ Just q
+               Just f  -> Just <$> f
 
 messageHandlerGenerator :: TVar ProcessState -> [Message] -> [(Message, STM ())]
 messageHandlerGenerator prSt msgs = 
@@ -486,7 +496,7 @@ receiveWaitImpl m =
 
 convertErrorCall :: ProcessM a -> ProcessM a
 convertErrorCall f =
-   do a <- Control.try ff
+   do a <- Lifted.try ff
       case a of
         Right c -> return c
         Left b -> throw $ TransmitException $ QteOther $ show (b::ErrorCall)
@@ -684,7 +694,7 @@ spawnLocalAnd fun prefix =
                       pid <- liftIO $ runLocalProcess (prNodeRef p) (myFun v)
                       liftIO $ takeMVar v
                       return pid
-   where myFun mv = (prefix `Control.finally` liftIO (putMVar mv ())) >> fun
+   where myFun mv = (prefix `Lifted.finally` liftIO (putMVar mv ())) >> fun
 
 -- | A synonym for 'spawnLocal'
 forkProcess :: ProcessM () -> ProcessM ProcessId
@@ -694,9 +704,7 @@ forkProcess = spawnLocal
 -- Not safe for export, as doing any message receive operation could
 -- result in a munged message queue. 
 forkProcessWeak :: ProcessM () -> ProcessM ()
-forkProcessWeak f = do p <- getProcess
-                       _res <- liftIO $ forkIO (runProcessM f p >> return ())
-                       return ()
+forkProcessWeak = void . Lifted.fork
 
 -- | Create a new process on the current node. Returns the new process's identifier.
 -- Unlike 'spawn', this function does not need a 'Closure' or a 'NodeId'. 
@@ -780,7 +788,7 @@ runLocalProcess node fun =
 ----------------------------------------------
 
 -- TODO this needs withMonitor a safe variant
--- To make this work with a ptimeout but still be able to return martial results,
+-- To make this work with a Lifted.timeout but still be able to return martial results,
 -- they need to be stored in an MVar. Also, like roundtipQuery, this should have
 -- two variants: a flavor that establishes monitors, and a timeout-based flavor.
 -- This also needs an ASYNC variant, that will send data simultaneously, from multiple subprocesses
@@ -820,7 +828,7 @@ generalPid (ProcessId n _p) = ProcessId n (-1)
 
 roundtripQuery :: (Serializable a, Serializable b) => PayloadDisposition -> ProcessId -> a -> ProcessM (Either TransmitStatus b)
 roundtripQuery pld pid dat =
-    do res <- Control.try $ withMonitor apid $ roundtripQueryImpl 0 pld pid dat Prelude.id []
+    do res <- Lifted.try $ withMonitor apid $ roundtripQueryImpl 0 pld pid dat Prelude.id []
        case res of
          Left (ServiceException s) -> return $ Left $ QteOther s
          Right (Left a) -> return (Left a)
@@ -941,14 +949,14 @@ sendTry pid msg msghdr pld = getProcess >>= (\_p ->
 -- of outgoing connections per node. //!!
                 q <- case 0 of -- case cfgRoundtripTimeout cfg of 
                    0 -> a
-                   n -> do ff <- ptimeout n $ a
+                   n -> do ff <- Lifted.timeout n $ a
                            case ff of
                               Nothing -> return QteConnectionTimeout
                               Just r -> return r
                 case q of
                    QteThrottle n -> liftIO (threadDelay n) >> timeoutFilter a
                    n -> return n
-          tryAction = Control.try action >>=
+          tryAction = Lifted.try action >>=
                     (\x -> case x of
                               Left l -> return $ QteEncodingError $ show (l::ErrorCall) -- catch errors from encoding
                               Right r -> return r)
@@ -1322,18 +1330,10 @@ isPidLocal pid = do mine <- getSelfPid
 
 suppressTransmitException :: ProcessM a -> ProcessM (Maybe a)
 suppressTransmitException a = 
-     do res <- Control.try a
+     do res <- Lifted.try a
         case res of
           Left (TransmitException _) -> return Nothing
           Right r -> return $ Just r
-
--- | A 'ProcessM'-flavoured variant of 'System.Timeout.timeout'
-ptimeout :: Int -> ProcessM a -> ProcessM (Maybe a)
-ptimeout t f = do p <- getProcess
-                  res <- liftIO $ System.Timeout.timeout t (runProcessM f p)
-                  case res of
-                    Nothing -> return Nothing
-                    Just (newp,newanswer) -> ProcessM (\_ -> return (newp,Just newanswer))
 
 ----------------------------------------------
 -- * Configuration file
@@ -1671,7 +1671,7 @@ startLoggingService = serviceThread ServiceLog logger
           do smsg <- liftIO $ showLogMessage txt
              case whereto of
               LtStdout -> liftIO $ putStrLn smsg
-              LtFile fp -> (Control.try (liftIO (appendFile fp (smsg ++ "\n"))) :: ProcessM (Either IOError ()) ) >> return () -- ignore error - what can we do?
+              LtFile fp -> (Lifted.try (liftIO (appendFile fp (smsg ++ "\n"))) :: ProcessM (Either IOError ()) ) >> return () -- ignore error - what can we do?
               LtForward nid -> do self <- getSelfNode
                                   when (self /= nid) 
                                     (sendSimple (adminGetPid nid ServiceLog) (forwardify txt) PldAdmin >> return ()) -- ignore error -- what can we do?
@@ -1830,7 +1830,7 @@ startFinalizerService todo = spawnLocalAnd body prefix >> return ()
                              do p <- getProcess
                                 node <- liftIO $ readMVar (prNodeRef p)
                                 liftIO $ takeMVar (ndNodeFinalizer node)
-                                todo `Control.finally` (liftIO $ putMVar (ndNodeFinalized node) ())
+                                todo `Lifted.finally` (liftIO $ putMVar (ndNodeFinalized node) ())
 
 
 performFinalization :: MVar Node -> IO ()
@@ -1845,7 +1845,7 @@ setDaemonic = do p <- getProcess
                     (\node -> return $ node {ndProcessTable=Map.adjust (\pte -> pte {pteDaemonic=True}) (localFromPid pid) (ndProcessTable node)})
 
 serviceThread :: ServiceId -> ProcessM () -> ProcessM ()
-serviceThread v f = spawnLocalAnd (Control.bracket (return ())
+serviceThread v f = spawnLocalAnd (Lifted.bracket (return ())
                              (\_ -> adminDeregister v >> logError)
                              (\_ -> f)) (adminRegister v >> setDaemonic)
                         >> (return()) 
@@ -2219,9 +2219,9 @@ withMonitoring :: ProcessId -> MonitorAction -> ProcessM a -> ProcessM a
 withMonitoring pid how f =  
                         do mypid <- getSelfPid
                            monitorProcess mypid pid how -- TODO if this throws a ServiceException, translate that into a trigger
-                           a <- f `Control.finally` safety (unmonitorProcess mypid pid how)
+                           a <- f `Lifted.finally` safety (unmonitorProcess mypid pid how)
                            return a
-              where safety n = Control.try n :: ProcessM (Either ServiceException ())
+              where safety n = Lifted.try n :: ProcessM (Either ServiceException ())
 
 
 -- | Establishes unidirectional processing of another process. The format is:
@@ -2332,7 +2332,7 @@ startProcessMonitorService = serviceThread ServiceProcessMonitor (service emptyG
          gl {glLinks = gdAddMonitor (glLinks gl) monitee action (localFromPid monitor) }
     addLocalNode gl monitor monitee _action =
          gl {glLinks = gdAddNode (glLinks gl) monitee (nodeFromPid monitor)}
-    broadcast nids msg = mapM_ (\p -> forkProcessWeak $ ((ptimeout 5000000 $ sendSimple (adminGetPid p ServiceProcessMonitor) msg PldAdmin) >> return ())) nids
+    broadcast nids msg = mapM_ (\p -> forkProcessWeak $ ((Lifted.timeout 5000000 $ sendSimple (adminGetPid p ServiceProcessMonitor) msg PldAdmin) >> return ())) nids
     handleProcessDown :: GlLinks -> ProcessId -> SignalReason -> ProcessM GlLinks
     handleProcessDown global pid why = 
                      do islocal <- isPidLocal pid
@@ -2550,7 +2550,7 @@ startSpawnerService = serviceThread ServiceSpawner spawner
    where spawner = receiveWait [matchSpawnRequest,matchCallRequest,matchUnknownThrow] >> spawner
          exceptFilt :: SomeException -> q -> q
          exceptFilt _ q = q
-         callWorker c responder = do a <- Control.try $ invokeClosure c
+         callWorker c responder = do a <- Lifted.try $ invokeClosure c
                                      case a of
                                         Left q -> exceptFilt q (responder Nothing)
                                         Right Nothing -> responder Nothing
