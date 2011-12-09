@@ -2081,10 +2081,10 @@ instance Binary GlCommand where
                        return $ GlUnmonitor a b c
 
 -- | The different kinds of monitoring available between processes.
-data MonitorAction = MaMonitor -- ^ MaMonitor means that the monitor process will be sent a ProcessDownException message when the monitee terminates for any reason.
-                   | MaLink -- ^ MaLink means that the monitor process will receive an asynchronous exception of type ProcessDownException when the monitee terminates for any reason
+data MonitorAction = MaMonitor -- ^ MaMonitor means that the monitor process will be sent a ProcessMonitorException message when the monitee terminates for any reason.
+                   | MaLink -- ^ MaLink means that the monitor process will receive an asynchronous exception of type ProcessMonitorException when the monitee terminates for any reason
 
-                   | MaLinkError -- ^ MaLinkError means that the monitor process will receive an asynchronous exception of type ProcessDownException when the monitee terminates abnormally
+                   | MaLinkError -- ^ MaLinkError means that the monitor process will receive an asynchronous exception of type ProcessMonitorException when the monitee terminates abnormally
 
                    deriving (Typeable,Show,Ord,Eq)
 instance Binary MonitorAction where 
