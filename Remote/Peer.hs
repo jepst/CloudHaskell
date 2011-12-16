@@ -10,8 +10,10 @@ import Prelude hiding (all, pi)
 
 import Network.Socket (defaultHints,sendTo,recv,sClose,Socket,getAddrInfo,AddrInfoFlag(..),setSocketOption,addrFlags,addrSocketType,addrFamily,SocketType(..),Family(..),addrProtocol,SocketOption(..),AddrInfo,bindSocket,addrAddress,SockAddr(..),socket)
 import Network.BSD (getProtocolNumber)
+import qualified Control.Exception.Lifted as Lifted (try)
+import qualified System.Timeout.Lifted as Lifted (timeout)
 import Control.Concurrent.MVar (takeMVar, newMVar, modifyMVar_)
-import Remote.Process (PeerInfo,pingNode,makeNodeFromHost,spawnLocalAnd,setDaemonic,TransmitStatus(..),TransmitException(..),PayloadDisposition(..),ptimeout,getSelfNode,sendSimple,cfgRole,cfgKnownHosts,cfgPeerDiscoveryPort,match,receiveWait,getSelfPid,getConfig,NodeId,PortId,ProcessM,ptry,localRegistryQueryNodes)
+import Remote.Process (PeerInfo,pingNode,makeNodeFromHost,spawnLocalAnd,setDaemonic,TransmitStatus(..),TransmitException(..),PayloadDisposition(..),getSelfNode,sendSimple,cfgRole,cfgKnownHosts,cfgPeerDiscoveryPort,match,receiveWait,getSelfPid,getConfig,NodeId,PortId,ProcessM,localRegistryQueryNodes)
 import Control.Monad.Trans (liftIO)
 import Data.Typeable (Typeable)
 import Data.Maybe (catMaybes)
@@ -116,7 +118,7 @@ getPeersDynamic t =
           port -> do  -- TODO should send broacast multiple times in case of packet loss
                       _ <- liftIO $ try $ sendBroadcast port (show pid) :: ProcessM (Either IOError ())
                       responses <- liftIO $ newMVar []
-                      _ <- ptimeout t (receiveInfo responses)
+                      _ <- Lifted.timeout t (receiveInfo responses)
                       res <- liftIO $ takeMVar responses
                       let all = map (\di -> (discRole di,[discNodeId di])) (nub res)
                       return $ foldl (\a (k,v) -> Map.insertWith (++) k v a ) Map.empty all
@@ -137,12 +139,12 @@ findRoles disc = Map.keys disc
 waitForDiscovery :: Int -> ProcessM Bool
 waitForDiscovery delay 
               | delay <= 0 = doit 
-              | otherwise = ptimeout delay doit >>= (return . maybe False id)
+              | otherwise = Lifted.timeout delay doit >>= (return . maybe False id)
            where doit =
                    do cfg <- getConfig
                       msg <- liftIO $ listenUdp (cfgPeerDiscoveryPort cfg)
                       nodeid <- getSelfNode
-                      res <- ptry $ sendSimple (read msg) (DiscoveryInfo {discNodeId=nodeid,discRole=cfgRole cfg}) PldUser
+                      res <- Lifted.try $ sendSimple (read msg) (DiscoveryInfo {discNodeId=nodeid,discRole=cfgRole cfg}) PldUser
                                  :: ProcessM (Either ErrorCall TransmitStatus)
                       case res of
                          Right QteOK -> return True
