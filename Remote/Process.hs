@@ -67,6 +67,7 @@ module Remote.Process  (
 import qualified Prelude as Prelude
 import Prelude hiding (catch, id, init, last, lookup, pi)
 
+import Control.Applicative (Applicative(..))
 import Control.Concurrent (forkIO,ThreadId,threadDelay)
 import Control.Concurrent.MVar (MVar,newMVar, newEmptyMVar,takeMVar,putMVar,modifyMVar,modifyMVar_,readMVar)
 import Control.Exception (ErrorCall(..),throwTo,bracket,try,Exception,throw,evaluate,finally,SomeException,catch)
@@ -281,6 +282,14 @@ instance Monad ProcessM where
 
 instance Functor ProcessM where
     fmap f v = ProcessM $ (\p -> (runProcessM v) p >>= (\x -> return $ fmap f x))
+
+instance Applicative ProcessM where
+    mf <*> mx =
+        ProcessM $ \p0 ->
+        runProcessM mf p0 >>= \(p1, f) ->
+        runProcessM mx p1 >>= \(p2, x) ->
+        return (p2, f x)
+    pure = return
 
 instance MonadIO ProcessM where
     liftIO arg = ProcessM $ \pr -> (arg >>= (\x -> return (pr,x)))
