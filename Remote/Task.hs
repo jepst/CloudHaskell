@@ -39,6 +39,7 @@ import System.Directory (renameFile)
 import Data.Binary (Binary,get,put,putWord8,getWord8)
 import Control.Exception (SomeException,Exception,throw)
 import Data.Typeable (Typeable)
+import Control.Applicative (Applicative(..))
 import Control.Monad (liftM,when)
 import Control.Monad.Trans (liftIO)
 import Control.Concurrent.MVar (MVar,modifyMVar,modifyMVar_,newMVar,newEmptyMVar,takeMVar,putMVar,readMVar,withMVar)
@@ -850,6 +851,20 @@ instance Monad TaskM where
                 (ts'',a') <- runTaskM (k a) (ts')
                 return (ts'',a')              
    return x = TaskM $ \ts -> return $ (ts,x)
+
+instance Functor TaskM where
+    f `fmap` m =
+        TaskM $ \ts ->
+        runTaskM m ts >>= \(ts', x) ->
+        return (ts', f x)
+
+instance Applicative TaskM where
+    mf <*> mx =
+        TaskM $ \ts ->
+        runTaskM mf ts >>= \(ts', f) ->
+        runTaskM mx ts' >>= \(ts'', x) ->
+        return (ts'', f x)
+    pure = return
 
 lookupForwardedRedeemer :: PromiseId -> TaskM (Maybe ProcessId)
 lookupForwardedRedeemer q = 
