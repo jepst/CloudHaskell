@@ -3,6 +3,8 @@ Cloud Haskell
 
 This is **Cloud Haskell**. It's a Haskell framework for distributed applications. Basically, it's a tool for writing applications that coordinate their work on a cluster of commodity computers or virtual machines. This is useful for providing highly reliable, redundant, long-running services, as well as for building compute-intensive applications that can benefit from lots of hardware.
 
+This package, and its [documentation](http://hackage.haskell.org/package/remote), is available on Hackage. You can also read the [paper](http://www.cl.cam.ac.uk/~jee36/remote.pdf). My [thesis](http://www.cl.cam.ac.uk/~jee36/thesis.pdf) additionally documents the task layer and some internals.
+
 Cloud Haskell has two interfaces:
 
 * an interface based on message-passing between distributed processes. Think of it as Erlang (or MPI) in Haskell. We call this part the _process layer_.
@@ -10,16 +12,13 @@ Cloud Haskell has two interfaces:
 
 This file contains a (slightly out-of-date) introduction to the process layer. There are example programs included in the distribution.
 
-We suggest perusing the up-to-date Haddock [documentation](http://www.cl.cam.ac.uk/~jee36/remote/) and the [paper](http://www.cl.cam.ac.uk/~jee36/remote.pdf). My [thesis](http://www.cl.cam.ac.uk/~jee36/thesis.pdf) additionally documents the task layer and some internals.
-
 
 Installation
 ------------
-Assuming you have the Haskell Platform installed, just run these commands from the Cloud Haskell directory:
+Assuming you have the Haskell Platform installed, just run this command from the Cloud Haskell directory:
 
 ```
-cabal configure
-cabal install
+cabal install remote
 ```
 
 You can then compile your own Cloud Haskell applications, or try out the programs in the examples directory.
