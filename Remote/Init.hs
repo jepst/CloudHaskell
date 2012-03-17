@@ -1,18 +1,16 @@
 -- | Exposes a high-level interface for starting a node of a distributed
 -- program, taking into account a local configuration file, command
 -- line arguments, and commonly-used system processes.
-module Remote.Init (remoteInit) where
-
-import qualified Prelude as Prelude
-import Prelude hiding (lookup)
+module Remote.Init (remoteInit,remoteInitFromConfig) where
 
 import Remote.Peer (startDiscoveryService)
 import Remote.Task (__remoteCallMetaData)
-import Remote.Process (startProcessRegistryService,suppressTransmitException,localRegistryRegisterNode,localRegistryHello,localRegistryUnregisterNode,
-                       startProcessMonitorService,startNodeMonitorService,startLoggingService,startSpawnerService,ProcessM,readConfig,initNode,startLocalRegistry,
+import Remote.Process (startProcessRegistryService,suppressTransmitException,pbracket,localRegistryRegisterNode,localRegistryHello,localRegistryUnregisterNode,
+                       startProcessMonitorService,startNodeMonitorService,startLoggingService,startSpawnerService,ProcessM,Config(..),readConfig,initNode,startLocalRegistry,
                        forkAndListenAndDeliver,waitForThreads,roleDispatch,Node,runLocalProcess,performFinalization,startFinalizerService)
 import Remote.Reg (registerCalls,RemoteCallMetaData)
 
+import System.FilePath (FilePath)
 import System.Environment (getEnvironment)
 import Control.Concurrent (threadDelay)
 import Control.Monad.Trans (liftIO)
@@ -32,8 +30,24 @@ startServices =
 
 dispatchServices :: MVar Node -> IO ()
 dispatchServices node = do mv <- newEmptyMVar
-                           _ <- runLocalProcess node (startServices >> liftIO (putMVar mv ()))
+                           runLocalProcess node (startServices >> liftIO (putMVar mv ()))
                            takeMVar mv
+
+
+remoteInitFromConfig :: Config -> [RemoteCallMetaData] -> (String -> ProcessM ()) -> IO ()
+remoteInitFromConfig cfg metadata f =
+       let
+          defaultMetaData = [Remote.Task.__remoteCallMetaData]
+          lookup = registerCalls (defaultMetaData ++ metadata)
+       in 
+       do
+          node <- initNode cfg lookup
+          _ <- startLocalRegistry cfg False -- potentially fails silently
+          forkAndListenAndDeliver node cfg
+          dispatchServices node
+          (roleDispatch node userFunction >> waitForThreads node) `finally` (performFinalization node)
+          threadDelay 500000 -- TODO make configurable, or something
+       where  userFunction s = localRegistryHello >> localRegistryRegisterNode >> f s
 
 -- | This is the usual way create a single node of distributed program.
 -- The intent is that 'remoteInit' be called in your program's 'Main.main'
@@ -52,21 +66,11 @@ dispatchServices node = do mv <- newEmptyMVar
 -- 4. The function initialProcess will be called, given as a parameter a string indicating the value of the cfgRole setting of this node. initialProcess is provided by the user and provides an entrypoint for controlling node behavior on startup.
 remoteInit :: Maybe FilePath -> [RemoteCallMetaData] -> (String -> ProcessM ()) -> IO ()
 remoteInit defaultConfig metadata f = 
-       let
-          defaultMetaData = [Remote.Task.__remoteCallMetaData]
-          lookup = registerCalls (defaultMetaData ++ metadata)
-       in
        do
           configFileName <- getConfigFileName
           cfg <- readConfig True configFileName
               -- TODO sanity-check cfg
-          node <- initNode cfg lookup
-          _ <- startLocalRegistry cfg False -- potentially fails silently
-          forkAndListenAndDeliver node cfg
-          dispatchServices node
-          (roleDispatch node userFunction >> waitForThreads node) `finally` (performFinalization node)
-          threadDelay 500000 -- TODO make configurable, or something
+          remoteInitFromConfig cfg metadata f
    where  getConfigFileName = do env <- getEnvironment
-                                 return $ maybe defaultConfig Just (Prelude.lookup "RH_CONFIG" env)
-          userFunction s = localRegistryHello >> localRegistryRegisterNode >> f s
+                                 return $ maybe defaultConfig Just (lookup "RH_CONFIG" env)
 
