@@ -3,7 +3,7 @@ Cloud Haskell
 
 This is **Cloud Haskell**. It's a Haskell framework for distributed applications. Basically, it's a tool for writing applications that coordinate their work on a cluster of commodity computers or virtual machines. This is useful for providing highly reliable, redundant, long-running services, as well as for building compute-intensive applications that can benefit from lots of hardware.
 
-This package and its [documentation](http://hackage.haskell.org/package/remote) are available on Hackage. You can also read the [paper](http://www.cl.cam.ac.uk/~jee36/remote.pdf). My [thesis](http://www.cl.cam.ac.uk/~jee36/thesis.pdf) additionally documents the task layer and some internals.
+This package and its [documentation](http://hackage.haskell.org/package/remote) are available on Hackage. You can also read the [paper](http://research.microsoft.com/en-us/um/people/simonpj/papers/parallel/remote.pdf). My [thesis](http://research.microsoft.com/en-us/um/people/simonpj/papers/parallel/epstein-thesis.pdf) additionally documents the task layer and some internals.
 
 Cloud Haskell has two interfaces:
 
