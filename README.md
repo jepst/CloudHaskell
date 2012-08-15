@@ -3,14 +3,19 @@ Cloud Haskell
 
 This is **Cloud Haskell**. It's a Haskell framework for distributed applications. Basically, it's a tool for writing applications that coordinate their work on a cluster of commodity computers or virtual machines. This is useful for providing highly reliable, redundant, long-running services, as well as for building compute-intensive applications that can benefit from lots of hardware.
 
-This package and its [documentation](http://hackage.haskell.org/package/remote) are available on Hackage. You can also read the [paper](http://research.microsoft.com/en-us/um/people/simonpj/papers/parallel/remote.pdf). My [thesis](http://research.microsoft.com/en-us/um/people/simonpj/papers/parallel/epstein-thesis.pdf) additionally documents the task layer and some internals.
+This package, [remote](http://hackage.haskell.org/package/remote) ([github](https://github.com/jepst/CloudHaskell)), contains the original, prototype implementation of Cloud Haskell, which now exists mainly for historical interest. This version has been surpassed by [distributed-process](http://hackage.haskell.org/package/distributed-process) ([github](https://github.com/haskell-distributed/distributed-process)). Although the interface for the two versions is similar, the newer version has a lot of important improvements, including support for polymorphic RPC and pluggable transport back-ends. Users considering Cloud Haskell for practical ends should start with the new version.
+
+For more information on Cloud Haskell, including motivation, sample applications, performance analysis, and a brief tutorial, I suggest the [paper](http://research.microsoft.com/en-us/um/people/simonpj/papers/parallel/remote.pdf). For even more information, try my [thesis](http://research.microsoft.com/en-us/um/people/simonpj/papers/parallel/epstein-thesis.pdf). These documents apply to the original version, but are mostly relevant to the newer version, as well.
+
+Tutorial
+========
+
+The remainder of this file contains a (slightly out-of-date) introduction to programming with Cloud Haskell. There are example programs included in the distribution.
 
 Cloud Haskell has two interfaces:
 
 * an interface based on message-passing between distributed processes. Think of it as Erlang (or MPI) in Haskell. We call this part the _process layer_.
 * a fault-tolerant data-centric interface. We call this part the _task layer_. This layer makes it even easier to build distributed applications; the framework automatically takes care of moving your data around and recovering from hardware failure. This layer can be compared to Google's MapReduce but is in fact more flexible.
-
-This file contains a (slightly out-of-date) introduction to the process layer. There are example programs included in the distribution.
 
 
 Installation
