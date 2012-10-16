@@ -1,3 +1,5 @@
+# Attention: This package is obsolete. Please use [distributed-process](https://github.com/haskell-distributed/distributed-process) instead.
+
 Cloud Haskell
 =============
 
